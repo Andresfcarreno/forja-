@@ -1,0 +1,228 @@
+//@version=5
+// =====================================================================
+// XAUUSD Session Opening Range Breakout (Asia -> London / pre-NY -> NY)
+// =====================================================================
+// Same logic as the companion MT5 EA (XAUUSD_SessionBreakout_EA.mq5):
+//   - Two configurable session ranges (default: Asian range, pre-NY range)
+//   - Breakout of the range, confirmed on bar close
+//   - Confluences: EMA trend filter, ATR volatility filter,
+//     previous-day High/Low extension filter
+//   - ATR-based SL, fixed R:R take profit (3, 4 or 5)
+//   - Draws the range box, entry marker, SL/TP lines on the chart
+//   - Built as a strategy() so you get a backtest + equity curve,
+//     as well as the visual markers.
+//
+// NOTE ON AUTOMATION: TradingView strategies do not place real broker
+// orders by themselves. To auto-trade this from TradingView you need
+// alertcondition()/alert() messages wired through a webhook to a
+// broker bridge (e.g. a VPS EA/service listening for the webhook).
+// alertcondition() calls are included below for that purpose. The
+// MT5 .mq5 EA in this same delivery trades XAUUSD natively without
+// needing any bridge.
+//
+// Session hour inputs are evaluated in the "tz" input below - set it
+// to match how you want to read session times (default UTC). Align
+// these with your broker's actual market hours.
+//
+// Educational / research template. Past performance of any backtest
+// does not guarantee future results. Test thoroughly before using
+// with real capital.
+// =====================================================================
+strategy("XAUUSD Session Opening Range Breakout", shorttitle="XAU SessBreak",
+         overlay=true, initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         pyramiding=0, calc_on_every_tick=false,
+         commission_type=strategy.commission.cash_per_contract, commission_value=0)
+
+// ===================== INPUTS =======================================
+tz = input.string("UTC", "Timezone for session hours", group="General",
+     tooltip="Match this to how your session hours below are defined (e.g. UTC). Align with your broker's server time / real market hours.")
+
+// --- Session A ---
+enableA        = input.bool(true, "Enable Session A", group="Session A (default: Asia -> London)")
+sessA          = input.session("0000-0700", "Range Session A", group="Session A (default: Asia -> London)")
+tradeWindowA   = input.session("0700-1100", "Trade Window A", group="Session A (default: Asia -> London)")
+
+// --- Session B ---
+enableB        = input.bool(true, "Enable Session B", group="Session B (default: pre-NY -> NY open)")
+sessB          = input.session("1100-1330", "Range Session B", group="Session B (default: pre-NY -> NY open)")
+tradeWindowB   = input.session("1330-1700", "Trade Window B", group="Session B (default: pre-NY -> NY open)")
+
+// --- Breakout confirmation ---
+buffer         = input.float(0.20, "Breakout confirmation buffer ($)", step=0.05, group="Breakout")
+
+// --- Trend filter ---
+useTrend       = input.bool(true, "Use EMA trend filter", group="Confluence: Trend")
+trendTF        = input.timeframe("60", "Trend filter timeframe", group="Confluence: Trend")
+emaFastLen     = input.int(50, "EMA Fast length", group="Confluence: Trend")
+emaSlowLen     = input.int(200, "EMA Slow length", group="Confluence: Trend")
+
+// --- ATR filter ---
+useATR         = input.bool(true, "Use ATR range filter", group="Confluence: Volatility (ATR)")
+atrLen         = input.int(14, "ATR period", group="Confluence: Volatility (ATR)")
+atrMinMult     = input.float(0.5, "Min range/ATR ratio", group="Confluence: Volatility (ATR)")
+atrMaxMult     = input.float(3.0, "Max range/ATR ratio", group="Confluence: Volatility (ATR)")
+
+// --- Previous day H/L filter ---
+usePrevDay     = input.bool(true, "Use previous day High/Low filter", group="Confluence: Prev Day H/L")
+maxExtATR      = input.float(2.0, "Max extension beyond prev day H/L (x ATR)", group="Confluence: Prev Day H/L")
+
+// --- Risk / SL / TP ---
+rrMult         = input.float(4.0, "Risk:Reward multiple (3, 4 or 5)", group="Risk / SL / TP")
+slATRMult      = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
+riskPercent    = input.float(1.0, "Risk % per trade (informational label only)", group="Risk / SL / TP",
+     tooltip="Position size above is set via 'default_qty_value=100% of equity' for a clean equity-curve backtest. For real risk-% position sizing per trade, size manually in your execution bridge using riskPercent and the SL distance shown on the chart.")
+
+// ===================== SESSION / ATR / EMA CORE =====================
+atrVal = ta.atr(atrLen)
+
+emaFast = request.security(syminfo.tickerid, trendTF, ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
+emaSlow = request.security(syminfo.tickerid, trendTF, ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+trendUp   = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+
+[pdHigh, pdLow] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+
+// ===================== SESSION A STATE ===============================
+inSessA   = not na(time(timeframe.period, sessA, tz))
+startA    = inSessA and not inSessA[1]
+endedA    = inSessA[1] and not inSessA
+inWindowA = not na(time(timeframe.period, tradeWindowA, tz))
+
+var float rangeHighA = na
+var float rangeLowA  = na
+var bool  readyA     = false
+var bool  tradedA    = false
+var box   rangeBoxA  = na
+
+if startA
+    rangeHighA := high
+    rangeLowA  := low
+    readyA     := false
+    tradedA    := false
+else if inSessA
+    rangeHighA := math.max(rangeHighA, high)
+    rangeLowA  := math.min(rangeLowA, low)
+
+if endedA and not na(rangeHighA)
+    readyA := true
+    rangeBoxA := box.new(bar_index, rangeHighA, bar_index + 30, rangeLowA,
+         border_color=color.new(color.blue, 30), bgcolor=color.new(color.blue, 88))
+
+if inWindowA and readyA and not na(rangeBoxA)
+    box.set_right(rangeBoxA, bar_index)
+
+rangeSizeA = rangeHighA - rangeLowA
+atrOkA        = not useATR or (rangeSizeA / atrVal >= atrMinMult and rangeSizeA / atrVal <= atrMaxMult)
+prevOkLongA   = not usePrevDay or (close - pdHigh) <= maxExtATR * atrVal
+prevOkShortA  = not usePrevDay or (pdLow - close) <= maxExtATR * atrVal
+
+longCondA  = enableA and inWindowA and readyA and not tradedA and close > rangeHighA + buffer
+shortCondA = enableA and inWindowA and readyA and not tradedA and close < rangeLowA  - buffer
+
+finalLongA  = longCondA  and (not useTrend or trendUp)   and atrOkA and prevOkLongA
+finalShortA = shortCondA and (not useTrend or trendDown) and atrOkA and prevOkShortA
+
+// ===================== SESSION B STATE ===============================
+inSessB   = not na(time(timeframe.period, sessB, tz))
+startB    = inSessB and not inSessB[1]
+endedB    = inSessB[1] and not inSessB
+inWindowB = not na(time(timeframe.period, tradeWindowB, tz))
+
+var float rangeHighB = na
+var float rangeLowB  = na
+var bool  readyB     = false
+var bool  tradedB    = false
+var box   rangeBoxB  = na
+
+if startB
+    rangeHighB := high
+    rangeLowB  := low
+    readyB     := false
+    tradedB    := false
+else if inSessB
+    rangeHighB := math.max(rangeHighB, high)
+    rangeLowB  := math.min(rangeLowB, low)
+
+if endedB and not na(rangeHighB)
+    readyB := true
+    rangeBoxB := box.new(bar_index, rangeHighB, bar_index + 30, rangeLowB,
+         border_color=color.new(color.orange, 30), bgcolor=color.new(color.orange, 88))
+
+if inWindowB and readyB and not na(rangeBoxB)
+    box.set_right(rangeBoxB, bar_index)
+
+rangeSizeB = rangeHighB - rangeLowB
+atrOkB        = not useATR or (rangeSizeB / atrVal >= atrMinMult and rangeSizeB / atrVal <= atrMaxMult)
+prevOkLongB   = not usePrevDay or (close - pdHigh) <= maxExtATR * atrVal
+prevOkShortB  = not usePrevDay or (pdLow - close) <= maxExtATR * atrVal
+
+longCondB  = enableB and inWindowB and readyB and not tradedB and close > rangeHighB + buffer
+shortCondB = enableB and inWindowB and readyB and not tradedB and close < rangeLowB  - buffer
+
+finalLongB  = longCondB  and (not useTrend or trendUp)   and atrOkB and prevOkLongB
+finalShortB = shortCondB and (not useTrend or trendDown) and atrOkB and prevOkShortB
+
+// ===================== ENTRY EXECUTION + VISUALS =====================
+drawTrade(bool isLong, string idPrefix) =>
+    slDist = atrVal * slATRMult
+    slPrice = isLong ? close - slDist : close + slDist
+    tpPrice = isLong ? close + slDist * rrMult : close - slDist * rrMult
+    if isLong
+        strategy.entry(idPrefix + "Long", strategy.long)
+    else
+        strategy.entry(idPrefix + "Short", strategy.short)
+    strategy.exit(idPrefix + "Exit", idPrefix + (isLong ? "Long" : "Short"), stop=slPrice, limit=tpPrice)
+    lbl = label.new(bar_index, isLong ? low - atrVal * 0.3 : high + atrVal * 0.3,
+         (isLong ? "BUY " : "SELL ") + idPrefix + "\nSL " + str.tostring(slPrice, format.mintick) +
+         "\nTP " + str.tostring(tpPrice, format.mintick),
+         style = isLong ? label.style_label_up : label.style_label_down,
+         color = isLong ? color.new(color.green, 0) : color.new(color.red, 0),
+         textcolor = color.white, size = size.small)
+    line.new(bar_index, slPrice, bar_index + 25, slPrice, color=color.red, style=line.style_dashed, width=1)
+    line.new(bar_index, tpPrice, bar_index + 25, tpPrice, color=color.green, style=line.style_dashed, width=1)
+    line.new(bar_index, close, bar_index + 25, close, color=color.gray, style=line.style_dotted, width=1)
+
+if finalLongA
+    tradedA := true
+    drawTrade(true, "A")
+
+if finalShortA
+    tradedA := true
+    drawTrade(false, "A")
+
+if finalLongB
+    tradedB := true
+    drawTrade(true, "B")
+
+if finalShortB
+    tradedB := true
+    drawTrade(false, "B")
+
+// ===================== ALERTS (for webhook -> broker bridge) =========
+alertcondition(finalLongA or finalLongB, title="XAU Session Breakout LONG",
+     message="XAUUSD session breakout LONG signal")
+alertcondition(finalShortA or finalShortB, title="XAU Session Breakout SHORT",
+     message="XAUUSD session breakout SHORT signal")
+
+// ===================== PLOTS / DIAGNOSTICS ============================
+plot(useTrend ? emaFast : na, "EMA Fast (trend TF)", color=color.aqua, linewidth=1)
+plot(useTrend ? emaSlow : na, "EMA Slow (trend TF)", color=color.fuchsia, linewidth=1)
+
+bgcolor(inSessA ? color.new(color.blue, 92) : inWindowA ? color.new(color.blue, 96) : na, title="Session A shading")
+bgcolor(inSessB ? color.new(color.orange, 92) : inWindowB ? color.new(color.orange, 96) : na, title="Session B shading")
+
+var table info = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Trend", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 0, trendUp ? "UP" : trendDown ? "DOWN" : "FLAT", text_color=color.white, bgcolor=trendUp ? color.green : trendDown ? color.red : color.gray)
+    table.cell(info, 0, 1, "Sess A range", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 1, str.tostring(rangeHighA, format.mintick) + " / " + str.tostring(rangeLowA, format.mintick), text_color=color.white, bgcolor=color.navy)
+    table.cell(info, 0, 2, "Sess A traded", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 2, tradedA ? "YES" : "no", text_color=color.white, bgcolor=color.navy)
+    table.cell(info, 0, 3, "Sess B range", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 3, str.tostring(rangeHighB, format.mintick) + " / " + str.tostring(rangeLowB, format.mintick), text_color=color.white, bgcolor=color.olive)
+    table.cell(info, 0, 4, "Sess B traded", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 4, tradedB ? "YES" : "no", text_color=color.white, bgcolor=color.olive)
+    table.cell(info, 0, 5, "ATR", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 5, str.tostring(atrVal, format.mintick), text_color=color.white, bgcolor=color.navy)

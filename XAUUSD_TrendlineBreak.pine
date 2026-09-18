@@ -1,0 +1,129 @@
+//@version=5
+// =====================================================================
+// XAUUSD Trendline Break Signal (own implementation, stop-and-reverse)
+// =====================================================================
+// This is an independent, self-contained recreation of the classic
+// "pivot-based dynamic trendline break" concept (the same idea behind
+// oscillators like LuxAlgo's Trendlines-with-Breaks) - NOT a copy of
+// any third-party proprietary script. It is built this way so it can
+// be fully automated end-to-end (Pine here + a matching MT5 EA),
+// instead of depending on whether a closed-source indicator exposes
+// alerts or a linkable plot() source.
+//
+// Logic:
+//   - Detect confirmed pivot highs/lows (lookback bars each side).
+//   - Draw a resistance trendline through the last 2 pivot highs, and
+//     a support trendline through the last 2 pivot lows, projected
+//     forward bar by bar.
+//   - Green dot: close crosses above the resistance trendline
+//     (bullish break) -> go long (closes any short first = reversal).
+//   - Red dot: close crosses below the support trendline
+//     (bearish break) -> go short (closes any long first = reversal).
+//   - Each entry carries an ATR-based SL and an R:R-based TP, so the
+//     position also closes automatically "when profit target is hit",
+//     exactly like you described - not only on the opposite dot.
+//
+// Educational / research template. Backtest and forward-test on demo
+// before using with real capital. No indicator or EA guarantees
+// profitability.
+// =====================================================================
+strategy("XAUUSD Trendline Break (Stop & Reverse)", shorttitle="XAU TL Break",
+         overlay=true, initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         pyramiding=0, calc_on_every_tick=false)
+
+// ===================== INPUTS =======================================
+pivotLen   = input.int(5, "Pivot lookback (bars each side)", minval=2, group="Trendline")
+showLines  = input.bool(true, "Draw trendlines on chart", group="Trendline")
+
+slATRMult  = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
+rrMult     = input.float(3.0, "Risk:Reward multiple (TP = SL distance x this)", group="Risk / SL / TP")
+atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
+
+// ===================== PIVOTS & TRENDLINES ============================
+atrVal = ta.atr(atrLen)
+
+ph = ta.pivothigh(pivotLen, pivotLen)
+pl = ta.pivotlow(pivotLen, pivotLen)
+
+var float ph1 = na
+var float ph2 = na
+var int   phBar1 = na
+var int   phBar2 = na
+var float pl1 = na
+var float pl2 = na
+var int   plBar1 = na
+var int   plBar2 = na
+
+var bool resBroken = false
+var bool supBroken = false
+
+if not na(ph)
+    ph2 := ph1
+    phBar2 := phBar1
+    ph1 := ph
+    phBar1 := bar_index - pivotLen
+    resBroken := false
+
+if not na(pl)
+    pl2 := pl1
+    plBar2 := plBar1
+    pl1 := pl
+    plBar1 := bar_index - pivotLen
+    supBroken := false
+
+resSlope = (not na(ph1) and not na(ph2) and phBar1 != phBar2) ? (ph1 - ph2) / (phBar1 - phBar2) : na
+supSlope = (not na(pl1) and not na(pl2) and plBar1 != plBar2) ? (pl1 - pl2) / (plBar1 - plBar2) : na
+
+resNow = not na(resSlope) ? ph1 + resSlope * (bar_index - phBar1) : na
+supNow = not na(supSlope) ? pl1 + supSlope * (bar_index - plBar1) : na
+
+// ===================== BREAK DETECTION =================================
+bullBreak = not na(resNow) and not resBroken and ta.crossover(close, resNow)
+bearBreak = not na(supNow) and not supBroken and ta.crossunder(close, supNow)
+
+if bullBreak
+    resBroken := true
+if bearBreak
+    supBroken := true
+
+// ===================== VISUALS =========================================
+var line resLine = na
+var line supLine = na
+
+if showLines and not na(resSlope)
+    line.delete(resLine)
+    resLine := line.new(phBar2, ph2, bar_index, resNow, color=color.new(color.red, 20), width=1, extend=extend.right)
+if showLines and not na(supSlope)
+    line.delete(supLine)
+    supLine := line.new(plBar2, pl2, bar_index, supNow, color=color.new(color.lime, 20), width=1, extend=extend.right)
+
+plotshape(bullBreak, title="Bullish Break (BUY)", style=shape.circle, location=location.belowbar,
+     color=color.new(color.lime, 0), size=size.small)
+plotshape(bearBreak, title="Bearish Break (SELL)", style=shape.circle, location=location.abovebar,
+     color=color.new(color.red, 0), size=size.small)
+
+// ===================== TRADE EXECUTION =================================
+if bullBreak
+    strategy.close("Short")
+    slDist = atrVal * slATRMult
+    slPrice = close - slDist
+    tpPrice = close + slDist * rrMult
+    strategy.entry("Long", strategy.long)
+    strategy.exit("ExitLong", "Long", stop=slPrice, limit=tpPrice)
+    label.new(bar_index, low - atrVal * 0.3, "BUY\nSL " + str.tostring(slPrice, format.mintick) + "\nTP " + str.tostring(tpPrice, format.mintick),
+         style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+
+if bearBreak
+    strategy.close("Long")
+    slDist = atrVal * slATRMult
+    slPrice = close + slDist
+    tpPrice = close - slDist * rrMult
+    strategy.entry("Short", strategy.short)
+    strategy.exit("ExitShort", "Short", stop=slPrice, limit=tpPrice)
+    label.new(bar_index, high + atrVal * 0.3, "SELL\nSL " + str.tostring(slPrice, format.mintick) + "\nTP " + str.tostring(tpPrice, format.mintick),
+         style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
+// ===================== ALERTS (for webhook -> broker bridge) ===========
+alertcondition(bullBreak, title="XAU Trendline Break BUY", message="XAUUSD trendline break BUY signal")
+alertcondition(bearBreak, title="XAU Trendline Break SELL", message="XAUUSD trendline break SELL signal")

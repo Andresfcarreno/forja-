@@ -63,6 +63,9 @@ atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
 showRPanel     = input.bool(true, "Draw automatic R-multiple panel on entry", group="Visuals")
 maxRLevels     = input.int(5, "Max R levels to draw", minval=1, maxval=10, group="Visuals")
 panelBarsRight = input.int(20, "Panel width (bars to the right)", minval=5, group="Visuals")
+showLivePanel  = input.bool(true, "Show live scanning panel", group="Visuals")
+panelSize      = input.string("normal", "Panel text size", options=["tiny", "small", "normal"], group="Visuals")
+tSize = panelSize == "tiny" ? size.tiny : panelSize == "small" ? size.small : size.normal
 
 // ===================== PIVOTS & TRENDLINES ============================
 atrVal = ta.atr(atrLen)
@@ -81,6 +84,14 @@ var int   plBar2 = na
 
 var bool resReacted = false
 var bool supReacted = false
+
+// last trade info, kept for the live status panel
+var float lastEntry     = na
+var float lastSL        = na
+var float lastTP        = na
+var bool  lastWasLong   = na
+var string lastReason   = "n/a"
+var int   lastSignalBar = na
 
 if not na(ph)
     ph2 := ph1
@@ -211,14 +222,20 @@ drawTrade(isLong, reason) =>
     strategy.entry(idPrefix, isLong ? strategy.long : strategy.short)
     strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice)
 
-    lblText = (isLong ? "▲ BUY — " : "▼ SELL — ") + reason +
-         "\nEntry " + str.tostring(entryPrice, format.mintick) +
-         "\nSL " + str.tostring(slPrice, format.mintick) + "   TP " + str.tostring(tpPrice, format.mintick) +
-         "\nR:R 1:" + str.tostring(rrMult, "#.##")
-    label.new(bar_index, isLong ? low - atrVal * 0.5 : high + atrVal * 0.5, lblText,
+    // Compact on-chart mark (direction + entry price only) - full detail lives in the live panel below,
+    // so the chart doesn't get buried in text boxes when several trades fire close together.
+    label.new(bar_index, isLong ? low - atrVal * 0.3 : high + atrVal * 0.3,
+         (isLong ? "▲ " : "▼ ") + str.tostring(entryPrice, format.mintick),
          style = isLong ? label.style_label_up : label.style_label_down,
          color = isLong ? color.new(color.green, 0) : color.new(color.red, 0),
-         textcolor = color.white, size = size.normal)
+         textcolor = color.white, size = size.tiny)
+
+    lastEntry     := entryPrice
+    lastSL        := slPrice
+    lastTP        := tpPrice
+    lastWasLong   := isLong
+    lastReason    := reason
+    lastSignalBar := bar_index
 
     if showRPanel
         drawRPanel(isLong, entryPrice, slPrice, slDist)
@@ -242,18 +259,53 @@ alertcondition(bounceLong,     title="XAU TL Break BUY (Bounce)",    message="XA
 alertcondition(breakoutShort,  title="XAU TL Break SELL (Breakout)", message="XAUUSD breakout SELL - support cleared")
 alertcondition(bounceShort,    title="XAU TL Break SELL (Bounce)",   message="XAUUSD bounce SELL - resistance respected")
 
-// ===================== INFO TABLE ========================================
-var table info = table.new(position.top_right, 2, 6, border_width=1)
-if barstate.islast
-    table.cell(info, 0, 0, "Entry mode", text_color=color.white, bgcolor=color.gray)
-    table.cell(info, 1, 0, entryMode, text_color=color.white, bgcolor=color.navy)
-    table.cell(info, 0, 1, "Resistance", text_color=color.white, bgcolor=color.gray)
-    table.cell(info, 1, 1, na(resNow) ? "n/a" : str.tostring(resNow, format.mintick) + (resReacted ? " (reacted)" : ""), text_color=color.white, bgcolor=color.maroon)
-    table.cell(info, 0, 2, "Support", text_color=color.white, bgcolor=color.gray)
-    table.cell(info, 1, 2, na(supNow) ? "n/a" : str.tostring(supNow, format.mintick) + (supReacted ? " (reacted)" : ""), text_color=color.white, bgcolor=color.olive)
-    table.cell(info, 0, 3, "ATR", text_color=color.white, bgcolor=color.gray)
-    table.cell(info, 1, 3, str.tostring(atrVal, format.mintick), text_color=color.white, bgcolor=color.navy)
-    table.cell(info, 0, 4, "Touch tolerance", text_color=color.white, bgcolor=color.gray)
-    table.cell(info, 1, 4, str.tostring(touchTol, format.mintick), text_color=color.white, bgcolor=color.navy)
-    table.cell(info, 0, 5, "Patterns", text_color=color.white, bgcolor=color.gray)
-    table.cell(info, 1, 5, (useEngulfing ? "Engulfing " : "") + (usePinBar ? "PinBar" : ""), text_color=color.white, bgcolor=color.navy)
+// ===================== LIVE SCANNING PANEL ================================
+distToRes    = na(resNow) ? na : resNow - close
+distToSup    = na(supNow) ? na : close - supNow
+distToResATR = (na(distToRes) or atrVal <= 0) ? na : distToRes / atrVal
+distToSupATR = (na(distToSup) or atrVal <= 0) ? na : distToSup / atrVal
+
+posSize    = strategy.position_size
+inPosition = posSize != 0
+isLongPos  = posSize > 0
+
+riskDist = (na(lastEntry) or na(lastSL)) ? na : math.abs(lastEntry - lastSL)
+liveR    = (not inPosition or na(riskDist) or riskDist == 0) ? na :
+     (isLongPos ? (close - lastEntry) / riskDist : (lastEntry - close) / riskDist)
+
+statusText  = inPosition ? (isLongPos ? "EN LONG" : "EN SHORT") :
+     touchingResistance ? "Tocando resistencia..." :
+     touchingSupport ? "Tocando soporte..." :
+     "Escaneando mercado..."
+statusColor = inPosition ? (isLongPos ? color.new(color.green, 10) : color.new(color.red, 10)) : color.new(color.gray, 20)
+
+barsAgo = na(lastSignalBar) ? na : bar_index - lastSignalBar
+
+var table livePanel = table.new(position.top_right, 2, 9, border_width=1)
+if showLivePanel and barstate.islast
+    table.cell(livePanel, 0, 0, "Estado", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 0, statusText, text_color=color.white, bgcolor=statusColor, text_size=tSize)
+
+    table.cell(livePanel, 0, 1, "Precio", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 1, str.tostring(close, format.mintick), text_color=color.white, bgcolor=color.navy, text_size=tSize)
+
+    table.cell(livePanel, 0, 2, "Resistencia", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 2, na(resNow) ? "n/a" : str.tostring(resNow, format.mintick) + "  (" + str.tostring(distToResATR, "#.##") + " ATR)", text_color=color.white, bgcolor=color.maroon, text_size=tSize)
+
+    table.cell(livePanel, 0, 3, "Soporte", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 3, na(supNow) ? "n/a" : str.tostring(supNow, format.mintick) + "  (" + str.tostring(distToSupATR, "#.##") + " ATR)", text_color=color.white, bgcolor=color.olive, text_size=tSize)
+
+    table.cell(livePanel, 0, 4, "Posición", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 4, inPosition ? str.tostring(math.abs(posSize), "#.##") + " lotes @ " + str.tostring(lastEntry, format.mintick) : "Sin posición", text_color=color.white, bgcolor=color.navy, text_size=tSize)
+
+    table.cell(livePanel, 0, 5, "SL / TP", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 5, inPosition ? str.tostring(lastSL, format.mintick) + " / " + str.tostring(lastTP, format.mintick) : "n/a", text_color=color.white, bgcolor=color.navy, text_size=tSize)
+
+    table.cell(livePanel, 0, 6, "R actual", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 6, na(liveR) ? "n/a" : str.tostring(liveR, "#.##") + "R  (objetivo 1:" + str.tostring(rrMult, "#.##") + ")", text_color=color.white, bgcolor=liveR > 0 ? color.new(color.green, 20) : color.new(color.red, 20), text_size=tSize)
+
+    table.cell(livePanel, 0, 7, "Última señal", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 7, lastReason + (na(barsAgo) ? "" : " (" + str.tostring(barsAgo) + " velas atrás)"), text_color=color.white, bgcolor=color.navy, text_size=tSize)
+
+    table.cell(livePanel, 0, 8, "Modo / Patrones", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 8, entryMode + " · " + (useEngulfing ? "Engulfing " : "") + (usePinBar ? "PinBar" : ""), text_color=color.white, bgcolor=color.navy, text_size=tSize)

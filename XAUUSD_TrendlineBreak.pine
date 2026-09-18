@@ -230,13 +230,6 @@ drawTrade(isLong, reason) =>
          color = isLong ? color.new(color.green, 0) : color.new(color.red, 0),
          textcolor = color.white, size = size.tiny)
 
-    lastEntry     := entryPrice
-    lastSL        := slPrice
-    lastTP        := tpPrice
-    lastWasLong   := isLong
-    lastReason    := reason
-    lastSignalBar := bar_index
-
     if showRPanel
         drawRPanel(isLong, entryPrice, slPrice, slDist)
 
@@ -245,11 +238,28 @@ drawTrade(isLong, reason) =>
          ',"sl":' + str.tostring(slPrice) + ',"tp":' + str.tostring(tpPrice) + '}'
     alert(alertMsg, alert.freq_once_per_bar)
 
+    [entryPrice, slPrice, tpPrice]
+
+// Global vars can only be reassigned at the script's top level, not from
+// inside a function - so drawTrade() returns the trade's numbers here and
+// the assignment to lastEntry/lastSL/... happens in this outer scope.
 if finalLong
-    drawTrade(true, reasonLong)
+    [e, s, t] = drawTrade(true, reasonLong)
+    lastEntry := e
+    lastSL := s
+    lastTP := t
+    lastWasLong := true
+    lastReason := reasonLong
+    lastSignalBar := bar_index
 
 if finalShort
-    drawTrade(false, reasonShort)
+    [e, s, t] = drawTrade(false, reasonShort)
+    lastEntry := e
+    lastSL := s
+    lastTP := t
+    lastWasLong := false
+    lastReason := reasonShort
+    lastSignalBar := bar_index
 
 // ===================== ALERTS (for webhook -> broker bridge) ===========
 alertcondition(finalLong,      title="XAU TL Break BUY (any)",       message="XAUUSD trendline BUY signal")

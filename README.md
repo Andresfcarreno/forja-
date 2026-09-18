@@ -59,18 +59,31 @@ Dos sistemas independientes, sobre **oro (XAUUSD)** únicamente:
 
 Nace de la pregunta: "¿cómo automatizo entradas cuando aparece un punto verde/rojo en un oscilador de ruptura de líneas de tendencia (tipo LuxAlgo)?". Respuesta corta: **no se puede "escuchar" directamente los puntos de un indicador de terceros** desde otro script — en Pine, `input.source()` solo puede leer valores dibujados con `plot()`, y esos puntos casi siempre se dibujan con `plotshape()`/`plotchar()`, que no son enlazables. Por eso se construyó una versión propia, con la misma idea visual y de trading, pero de código 100% nuestro y totalmente automatizable.
 
-## Lógica
+## Lógica (v2 — "reacción en la línea")
 
 1. Se detectan pivotes de máximo/mínimo confirmados (`PivotLookback` velas a cada lado).
 2. Se traza una línea de resistencia por los 2 últimos pivotes de máximo, y una de soporte por los 2 últimos pivotes de mínimo, proyectadas hacia adelante vela a vela.
-3. **Punto verde (compra)**: el cierre de una vela cruza por encima de la línea de resistencia. Si había una posición corta abierta, se cierra e invierte (stop & reverse).
-4. **Punto rojo (venta)**: el cierre cruza por debajo de la línea de soporte. Si había una posición larga abierta, se cierra e invierte.
-5. Cada entrada lleva **SL = ATR × 1.5** y **TP = distancia del SL × ratio R:R** (por defecto 3) — así la posición también se cierra sola "al llegar al beneficio", no solo cuando aparece el punto contrario, tal como pediste.
+3. Cada vez que el precio reacciona contra una de estas líneas, hay exactamente dos desenlaces posibles, y el sistema opera el que realmente ocurra:
+   - **Ruptura (continuación)**: el cierre de una vela supera la línea (+ buffer de confirmación) → entrada a favor de la ruptura. Es el "punto verde/rojo" original.
+   - **Rebote (reversión)**: el precio toca la línea (dentro de una tolerancia basada en ATR) pero **no** la supera, y se confirma con un **patrón de vela de reversión** (envolvente alcista/bajista, martillo o estrella fugaz) → entrada en sentido contrario a la línea.
+   - Ejemplo en resistencia: o rompe hacia arriba (compra por continuación) o la respeta con un patrón bajista (venta por reversión). Simétrico en soporte.
+   - La línea que reacciona primero queda "usada" (no vuelve a disparar señal) hasta que un nuevo pivote la reproyecte.
+4. Si había una posición contraria abierta, se cierra e invierte (stop & reverse) al aparecer una señal confirmada en el sentido opuesto.
+5. Cada entrada lleva **SL = ATR × 1.5** y **TP = distancia del SL × ratio R:R** (por defecto 3, configurable a 4 o 5 según el objetivo) — así la posición también se cierra sola "al llegar al beneficio", no solo cuando aparece la señal contraria.
+6. **Panel visual automático de R-múltiplos**: en cada entrada se dibujan automáticamente los niveles 0 (entrada), SL y 1R…NR (por defecto hasta 5), con zonas sombreadas de ganancia/pérdida — el equivalente automatizado de medir la operación a mano con Fibonacci/regla de medición.
+7. Modo de entrada configurable (`EntryMode` / `entryMode`): *Breakout Only* (solo continuación, comportamiento del v1), *Bounce Only* (solo reversión confirmada por patrón de vela) o *Both* (el sistema opera lo que realmente suceda en la línea — recomendado).
 
 ## Archivos
 
-- [XAUUSD_TrendlineBreak_EA.mq5](XAUUSD_TrendlineBreak_EA.mq5) — EA para MT5, opera stop & reverse de forma automática y dibuja las líneas de tendencia en el gráfico.
-- [XAUUSD_TrendlineBreak.pine](XAUUSD_TrendlineBreak.pine) — Script Pine v5 para TradingView, dibuja las líneas, los puntos verdes/rojos, las etiquetas de entrada con SL/TP, y corre como `strategy()` para backtest.
+- [XAUUSD_TrendlineBreak_EA.mq5](XAUUSD_TrendlineBreak_EA.mq5) — EA para MT5: detecta ruptura y rebote, opera stop & reverse de forma automática, y dibuja las líneas de tendencia, las señales y el panel de R-múltiplos en el gráfico.
+- [XAUUSD_TrendlineBreak.pine](XAUUSD_TrendlineBreak.pine) — Script Pine v5 para TradingView: misma lógica de ruptura/rebote, etiquetas de entrada mejoradas (motivo, entrada, SL, TP, R:R), panel automático de R-múltiplos, y corre como `strategy()` para backtest.
+
+## Parámetros nuevos de la v2
+
+- `touchATRMult` / `TouchATRMultiplier`: qué tan cerca (en múltiplos de ATR) debe llegar el precio a la línea para contar como "toque" válido para un rebote.
+- `useEngulfing` / `UseEngulfingPattern` y `usePinBar` / `UsePinBarPattern`: qué patrones de vela confirman el rebote.
+- `showRPanel` / `ShowRPanel`, `maxRLevels` / `MaxRLevels`, `panelBarsRight` / `PanelBars`: controlan el panel visual de R-múltiplos.
+- Si ves demasiadas señales de rebote de baja calidad, sube `touchATRMult` (toque más exigente) o desactiva uno de los dos patrones de vela para hacerlo más selectivo — el mismo principio de "todas las confluencias" del sistema de sesión aplica aquí.
 
 ## Instalación
 

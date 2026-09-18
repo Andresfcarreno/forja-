@@ -10,18 +10,29 @@
 // instead of depending on whether a closed-source indicator exposes
 // alerts or a linkable plot() source.
 //
-// Logic:
-//   - Detect confirmed pivot highs/lows (lookback bars each side).
-//   - Draw a resistance trendline through the last 2 pivot highs, and
-//     a support trendline through the last 2 pivot lows, projected
-//     forward bar by bar.
-//   - Green dot: close crosses above the resistance trendline
-//     (bullish break) -> go long (closes any short first = reversal).
-//   - Red dot: close crosses below the support trendline
-//     (bearish break) -> go short (closes any long first = reversal).
+// Logic (v2 - "reaction at the line"):
+//   - Detect confirmed pivot highs/lows (lookback bars each side) and
+//     project a resistance line through the last 2 pivot highs and a
+//     support line through the last 2 pivot lows.
+//   - Every time price reacts to one of these lines, there are exactly
+//     two possible outcomes, and the script trades whichever one
+//     actually happens:
+//       1) BREAKOUT (continuation): a closed bar clears the line by
+//          the confirmation buffer -> trade in the breakout direction.
+//       2) BOUNCE (reversal): price touches the line (within an
+//          ATR-based tolerance) but does NOT clear it, and a
+//          candlestick reversal pattern (engulfing and/or pin bar)
+//          confirms the rejection -> trade in the opposite direction.
+//   - Whichever fires first "reacts" that line (resReacted/supReacted)
+//     so it does not fire twice; the line resets and can react again
+//     only once a fresh pivot re-projects it.
 //   - Each entry carries an ATR-based SL and an R:R-based TP, so the
 //     position also closes automatically "when profit target is hit",
-//     exactly like you described - not only on the opposite dot.
+//     not only on the opposite signal. An opposite confirmed signal
+//     still closes/reverses the current position (stop & reverse).
+//   - An automatic "R-multiple panel" is drawn on every entry (entry,
+//     SL and 1R..NR levels + profit/loss shading), the same way you'd
+//     mark it manually with a Fibonacci/measurement tool.
 //
 // Educational / research template. Backtest and forward-test on demo
 // before using with real capital. No indicator or EA guarantees
@@ -30,15 +41,28 @@
 strategy("XAUUSD Trendline Break (Stop & Reverse)", shorttitle="XAU TL Break",
          overlay=true, initial_capital=10000,
          default_qty_type=strategy.percent_of_equity, default_qty_value=100,
-         pyramiding=0, calc_on_every_tick=false)
+         pyramiding=0, calc_on_every_tick=false,
+         max_lines_count=300, max_labels_count=300, max_boxes_count=300)
 
 // ===================== INPUTS =======================================
 pivotLen   = input.int(5, "Pivot lookback (bars each side)", minval=2, group="Trendline")
 showLines  = input.bool(true, "Draw trendlines on chart", group="Trendline")
 
+entryMode  = input.string("Both", "Entry mode", options=["Breakout Only", "Bounce Only", "Both"], group="Entry Logic",
+     tooltip="Breakout Only = trade continuation when the line is cleared. Bounce Only = trade reversal when the line is respected with a candle pattern. Both = trade whichever outcome actually happens.")
+breakoutBuffer = input.float(0.20, "Breakout confirmation buffer ($)", step=0.05, group="Entry Logic")
+touchATRMult   = input.float(0.35, "Touch tolerance for bounce (x ATR)", step=0.05, group="Entry Logic",
+     tooltip="How close price needs to get to the line (in ATR) to count as a 'touch' eligible for a bounce trade.")
+useEngulfing   = input.bool(true, "Confirm bounce with Engulfing pattern", group="Entry Logic")
+usePinBar      = input.bool(true, "Confirm bounce with Pin Bar (hammer / shooting star)", group="Entry Logic")
+
 slATRMult  = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
 rrMult     = input.float(3.0, "Risk:Reward multiple (TP = SL distance x this)", group="Risk / SL / TP")
 atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
+
+showRPanel     = input.bool(true, "Draw automatic R-multiple panel on entry", group="Visuals")
+maxRLevels     = input.int(5, "Max R levels to draw", minval=1, maxval=10, group="Visuals")
+panelBarsRight = input.int(20, "Panel width (bars to the right)", minval=5, group="Visuals")
 
 // ===================== PIVOTS & TRENDLINES ============================
 atrVal = ta.atr(atrLen)
@@ -55,22 +79,22 @@ var float pl2 = na
 var int   plBar1 = na
 var int   plBar2 = na
 
-var bool resBroken = false
-var bool supBroken = false
+var bool resReacted = false
+var bool supReacted = false
 
 if not na(ph)
     ph2 := ph1
     phBar2 := phBar1
     ph1 := ph
     phBar1 := bar_index - pivotLen
-    resBroken := false
+    resReacted := false
 
 if not na(pl)
     pl2 := pl1
     plBar2 := plBar1
     pl1 := pl
     plBar1 := bar_index - pivotLen
-    supBroken := false
+    supReacted := false
 
 resSlope = (not na(ph1) and not na(ph2) and phBar1 != phBar2) ? (ph1 - ph2) / (phBar1 - phBar2) : na
 supSlope = (not na(pl1) and not na(pl2) and plBar1 != plBar2) ? (pl1 - pl2) / (plBar1 - plBar2) : na
@@ -78,16 +102,47 @@ supSlope = (not na(pl1) and not na(pl2) and plBar1 != plBar2) ? (pl1 - pl2) / (p
 resNow = not na(resSlope) ? ph1 + resSlope * (bar_index - phBar1) : na
 supNow = not na(supSlope) ? pl1 + supSlope * (bar_index - plBar1) : na
 
-// ===================== BREAK DETECTION =================================
-bullBreak = not na(resNow) and not resBroken and ta.crossover(close, resNow)
-bearBreak = not na(supNow) and not supBroken and ta.crossunder(close, supNow)
+// ===================== CANDLESTICK REVERSAL PATTERNS ===================
+body       = math.abs(close - open)
+upperWick  = high - math.max(close, open)
+lowerWick  = math.min(close, open) - low
 
-if bullBreak
-    resBroken := true
-if bearBreak
-    supBroken := true
+bullishEngulfing = close[1] < open[1] and close > open and close >= open[1] and open <= close[1]
+bearishEngulfing = close[1] > open[1] and close < open and open >= close[1] and close <= open[1]
 
-// ===================== VISUALS =========================================
+isHammer       = body > 0 and lowerWick >= body * 2.0 and upperWick <= body * 0.6
+isShootingStar = body > 0 and upperWick >= body * 2.0 and lowerWick <= body * 0.6
+
+bullishPattern = (useEngulfing and bullishEngulfing) or (usePinBar and isHammer)
+bearishPattern = (useEngulfing and bearishEngulfing) or (usePinBar and isShootingStar)
+
+// ===================== TOUCH DETECTION ==================================
+touchTol = atrVal * touchATRMult
+touchingSupport    = not na(supNow) and low  <= supNow + touchTol and close > supNow - touchTol
+touchingResistance = not na(resNow) and high >= resNow - touchTol and close < resNow + touchTol
+
+// ===================== REACTION AT THE LINE (breakout vs bounce) =======
+allowBreakout = entryMode != "Bounce Only"
+allowBounce   = entryMode != "Breakout Only"
+
+breakoutLong  = allowBreakout and not na(resNow) and not resReacted and close > resNow + breakoutBuffer
+bounceShort   = not breakoutLong and allowBounce and touchingResistance and not resReacted and bearishPattern
+
+breakoutShort = allowBreakout and not na(supNow) and not supReacted and close < supNow - breakoutBuffer
+bounceLong    = not breakoutShort and allowBounce and touchingSupport and not supReacted and bullishPattern
+
+if breakoutLong or bounceShort
+    resReacted := true
+if breakoutShort or bounceLong
+    supReacted := true
+
+finalLong  = breakoutLong or bounceLong
+finalShort = breakoutShort or bounceShort
+
+reasonLong  = breakoutLong ? "Breakout @ Resistance" : "Bounce @ Support"
+reasonShort = breakoutShort ? "Breakout @ Support" : "Bounce @ Resistance"
+
+// ===================== VISUALS: TRENDLINES ==============================
 var line resLine = na
 var line supLine = na
 
@@ -98,32 +153,107 @@ if showLines and not na(supSlope)
     line.delete(supLine)
     supLine := line.new(plBar2, pl2, bar_index, supNow, color=color.new(color.lime, 20), width=1, extend=extend.right)
 
-plotshape(bullBreak, title="Bullish Break (BUY)", style=shape.circle, location=location.belowbar,
-     color=color.new(color.lime, 0), size=size.small)
-plotshape(bearBreak, title="Bearish Break (SELL)", style=shape.circle, location=location.abovebar,
-     color=color.new(color.red, 0), size=size.small)
+plotshape(breakoutLong,  title="Breakout Long (Resistance)",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0),   size=size.small)
+plotshape(bounceLong,    title="Bounce Long (Support)",       style=shape.circle,       location=location.belowbar, color=color.new(color.aqua, 0),   size=size.small)
+plotshape(breakoutShort, title="Breakout Short (Support)",    style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),    size=size.small)
+plotshape(bounceShort,   title="Bounce Short (Resistance)",   style=shape.circle,       location=location.abovebar, color=color.new(color.orange, 0), size=size.small)
 
-// ===================== TRADE EXECUTION =================================
-if bullBreak
-    strategy.close("Short")
-    slDist = atrVal * slATRMult
-    slPrice = close - slDist
-    tpPrice = close + slDist * rrMult
-    strategy.entry("Long", strategy.long)
-    strategy.exit("ExitLong", "Long", stop=slPrice, limit=tpPrice)
-    label.new(bar_index, low - atrVal * 0.3, "BUY\nSL " + str.tostring(slPrice, format.mintick) + "\nTP " + str.tostring(tpPrice, format.mintick),
-         style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+// ===================== R-MULTIPLE PANEL (auto Fibonacci-like levels) ===
+var line[]  panelLines  = array.new<line>()
+var label[] panelLabels = array.new<label>()
+var box[]   panelBoxes  = array.new<box>()
 
-if bearBreak
-    strategy.close("Long")
-    slDist = atrVal * slATRMult
-    slPrice = close + slDist
-    tpPrice = close - slDist * rrMult
-    strategy.entry("Short", strategy.short)
-    strategy.exit("ExitShort", "Short", stop=slPrice, limit=tpPrice)
-    label.new(bar_index, high + atrVal * 0.3, "SELL\nSL " + str.tostring(slPrice, format.mintick) + "\nTP " + str.tostring(tpPrice, format.mintick),
-         style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+clearPanel() =>
+    if array.size(panelLines) > 0
+        for i = 0 to array.size(panelLines) - 1
+            line.delete(array.get(panelLines, i))
+        array.clear(panelLines)
+    if array.size(panelLabels) > 0
+        for i = 0 to array.size(panelLabels) - 1
+            label.delete(array.get(panelLabels, i))
+        array.clear(panelLabels)
+    if array.size(panelBoxes) > 0
+        for i = 0 to array.size(panelBoxes) - 1
+            box.delete(array.get(panelBoxes, i))
+        array.clear(panelBoxes)
+
+drawRPanel(isLong, entryPrice, slPrice, slDist) =>
+    clearPanel()
+    rightBar = bar_index + panelBarsRight
+
+    array.push(panelLines, line.new(bar_index, entryPrice, rightBar, entryPrice, color=color.new(color.gray, 30), style=line.style_dashed))
+    array.push(panelLabels, label.new(rightBar, entryPrice, "0  " + str.tostring(entryPrice, format.mintick), style=label.style_label_left, size=size.small, color=color.new(color.gray, 70), textcolor=color.white))
+
+    array.push(panelLines, line.new(bar_index, slPrice, rightBar, slPrice, color=color.new(color.red, 10), style=line.style_dashed, width=2))
+    array.push(panelLabels, label.new(rightBar, slPrice, "SL  " + str.tostring(slPrice, format.mintick), style=label.style_label_left, size=size.small, color=color.new(color.red, 50), textcolor=color.white))
+
+    tpFinal = isLong ? entryPrice + slDist * rrMult : entryPrice - slDist * rrMult
+    array.push(panelBoxes, box.new(bar_index, entryPrice, rightBar, tpFinal, bgcolor=color.new(color.green, 88), border_color=color.new(color.green, 60)))
+    array.push(panelBoxes, box.new(bar_index, entryPrice, rightBar, slPrice, bgcolor=color.new(color.red, 88), border_color=color.new(color.red, 60)))
+
+    for i = 1 to maxRLevels
+        levelPrice = isLong ? entryPrice + slDist * i : entryPrice - slDist * i
+        isTarget   = i <= int(math.round(rrMult))
+        lvlColor   = isTarget ? color.new(color.green, 20) : color.new(color.teal, 40)
+        array.push(panelLines, line.new(bar_index, levelPrice, rightBar, levelPrice, color=lvlColor, style=line.style_dotted))
+        array.push(panelLabels, label.new(rightBar, levelPrice, str.tostring(i) + "  " + str.tostring(levelPrice, format.mintick), style=label.style_label_left, size=size.small, color=isTarget ? color.new(color.green, 50) : color.new(color.teal, 60), textcolor=color.white))
+
+// ===================== TRADE EXECUTION + LABELS =========================
+drawTrade(isLong, reason) =>
+    strategy.close(isLong ? "Short" : "Long")
+
+    slDist     = atrVal * slATRMult
+    entryPrice = close
+    slPrice    = isLong ? entryPrice - slDist : entryPrice + slDist
+    tpPrice    = isLong ? entryPrice + slDist * rrMult : entryPrice - slDist * rrMult
+    idPrefix   = isLong ? "Long" : "Short"
+
+    strategy.entry(idPrefix, isLong ? strategy.long : strategy.short)
+    strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice)
+
+    lblText = (isLong ? "▲ BUY — " : "▼ SELL — ") + reason +
+         "\nEntry " + str.tostring(entryPrice, format.mintick) +
+         "\nSL " + str.tostring(slPrice, format.mintick) + "   TP " + str.tostring(tpPrice, format.mintick) +
+         "\nR:R 1:" + str.tostring(rrMult, "#.##")
+    label.new(bar_index, isLong ? low - atrVal * 0.5 : high + atrVal * 0.5, lblText,
+         style = isLong ? label.style_label_up : label.style_label_down,
+         color = isLong ? color.new(color.green, 0) : color.new(color.red, 0),
+         textcolor = color.white, size = size.normal)
+
+    if showRPanel
+        drawRPanel(isLong, entryPrice, slPrice, slDist)
+
+    alertMsg = '{"symbol":"' + syminfo.ticker + '","side":"' + (isLong ? "BUY" : "SELL") +
+         '","reason":"' + reason + '","entry":' + str.tostring(entryPrice) +
+         ',"sl":' + str.tostring(slPrice) + ',"tp":' + str.tostring(tpPrice) + '}'
+    alert(alertMsg, alert.freq_once_per_bar)
+
+if finalLong
+    drawTrade(true, reasonLong)
+
+if finalShort
+    drawTrade(false, reasonShort)
 
 // ===================== ALERTS (for webhook -> broker bridge) ===========
-alertcondition(bullBreak, title="XAU Trendline Break BUY", message="XAUUSD trendline break BUY signal")
-alertcondition(bearBreak, title="XAU Trendline Break SELL", message="XAUUSD trendline break SELL signal")
+alertcondition(finalLong,      title="XAU TL Break BUY (any)",       message="XAUUSD trendline BUY signal")
+alertcondition(finalShort,     title="XAU TL Break SELL (any)",      message="XAUUSD trendline SELL signal")
+alertcondition(breakoutLong,   title="XAU TL Break BUY (Breakout)",  message="XAUUSD breakout BUY - resistance cleared")
+alertcondition(bounceLong,     title="XAU TL Break BUY (Bounce)",    message="XAUUSD bounce BUY - support respected")
+alertcondition(breakoutShort,  title="XAU TL Break SELL (Breakout)", message="XAUUSD breakout SELL - support cleared")
+alertcondition(bounceShort,    title="XAU TL Break SELL (Bounce)",   message="XAUUSD bounce SELL - resistance respected")
+
+// ===================== INFO TABLE ========================================
+var table info = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Entry mode", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 0, entryMode, text_color=color.white, bgcolor=color.navy)
+    table.cell(info, 0, 1, "Resistance", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 1, na(resNow) ? "n/a" : str.tostring(resNow, format.mintick) + (resReacted ? " (reacted)" : ""), text_color=color.white, bgcolor=color.maroon)
+    table.cell(info, 0, 2, "Support", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 2, na(supNow) ? "n/a" : str.tostring(supNow, format.mintick) + (supReacted ? " (reacted)" : ""), text_color=color.white, bgcolor=color.olive)
+    table.cell(info, 0, 3, "ATR", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 3, str.tostring(atrVal, format.mintick), text_color=color.white, bgcolor=color.navy)
+    table.cell(info, 0, 4, "Touch tolerance", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 4, str.tostring(touchTol, format.mintick), text_color=color.white, bgcolor=color.navy)
+    table.cell(info, 0, 5, "Patterns", text_color=color.white, bgcolor=color.gray)
+    table.cell(info, 1, 5, (useEngulfing ? "Engulfing " : "") + (usePinBar ? "PinBar" : ""), text_color=color.white, bgcolor=color.navy)

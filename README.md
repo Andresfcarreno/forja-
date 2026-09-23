@@ -98,6 +98,12 @@ Nace de la pregunta: "¿cómo automatizo entradas cuando aparece un punto verde/
 - **Notificaciones push**: `EnablePushNotifications` (activado por defecto) — manda un push a tu celular al abrir cada operación (símbolo, dirección, lotes, SL/TP, motivo) y al cerrarla (motivo: SL/TP/manual, P/L, conteo de SL seguidos). Requiere vincular tu MetaQuotes ID: en MT5 ve a `Herramientas → Opciones → Notificaciones`, marca "Habilitar notificaciones push" e ingresa el ID que te muestra la app de MetaTrader en tu celular (pestaña "Mensajes" → ícono de engranaje).
 - Los ratios de riesgo:beneficio (`RR_Multiplier`) y el SL base en ATR (`SL_ATR_Multiplier`) no cambiaron — la gestión de riesgo nueva solo controla el tamaño de la posición y cuándo se permite operar, no la distancia del SL/TP en sí.
 
+## Panel en vivo del EA (v3.1)
+
+Al adjuntar el EA aparece un panel real en la esquina superior derecha del gráfico (fondo + texto, no un simple `Comment()`), con: estado (escaneando / tocando línea / en posición / pausado por qué motivo), precio, resistencia y soporte con distancia en ATR, posición abierta (lotes, SL/TP, R actual), última señal y pérdida diaria / drawdown vs. sus límites. Se actualiza en cada tick.
+
+Las líneas de resistencia/soporte y el panel ya no dependen de que el EA "observe" pivotes formarse desde que lo adjuntas — al iniciar, escanea el historial ya cargado en el gráfico para encontrar los 2 pivotes más recientes de cada tipo, así que se ven datos reales desde el primer segundo (en vez de esperar horas en temporalidades altas).
+
 ## Instalación
 
 Mismo procedimiento que el sistema de sesión (sección 1): compilar/adjuntar el `.mq5` en MT5, o pegar el `.pine` en el Pine Editor de TradingView. Mismas advertencias sobre backtest/demo antes de capital real, y mismo filtro de spread máximo en el EA.

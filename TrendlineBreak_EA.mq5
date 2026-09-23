@@ -125,6 +125,17 @@ double   peakEquity            = 0;
 bool     dailyProtectionActive = false;
 bool     accountBlownProtection = false;
 
+// Cached per-bar values, read every tick by the on-chart panel
+double   gResNow = 0, gSupNow = 0;
+bool     gHaveRes = false, gHaveSup = false;
+double   gAtr = 0;
+bool     gTouchingRes = false, gTouchingSup = false;
+
+string   lastSignalReason = "n/a";
+datetime lastSignalTime   = 0;
+
+#define PANEL_ROWS 11
+
 //+------------------------------------------------------------------+
 int OnInit()
   {
@@ -141,6 +152,9 @@ int OnInit()
    peakEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
    dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
+   FindRecentPivotsFromHistory();
+   EnsurePanelObjects();
+
    return(INIT_SUCCEEDED);
   }
 
@@ -149,6 +163,7 @@ void OnDeinit(const int reason)
   {
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
    Comment("");
+   RemovePanelObjects();
   }
 
 //+------------------------------------------------------------------+
@@ -163,6 +178,134 @@ bool SpreadOK()
   {
    double spreadPts = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
    return(spreadPts <= MaxSpreadPoints);
+  }
+
+//+------------------------------------------------------------------+
+//| On-chart live panel - a real background box + text rows (not     |
+//| just Comment()), so it's impossible to miss and shows exactly    |
+//| what the EA is scanning for, updated every tick.                 |
+//+------------------------------------------------------------------+
+void EnsurePanelObjects()
+  {
+   string bg = "TLBreak_Panel_BG";
+   if(ObjectFind(0, bg) < 0)
+     {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, 20);
+      ObjectSetInteger(0, bg, OBJPROP_XSIZE, 300);
+      ObjectSetInteger(0, bg, OBJPROP_YSIZE, 14 + PANEL_ROWS * 16);
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'20,20,20');
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_COLOR, clrGray);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
+     }
+
+   for(int i = 0; i < PANEL_ROWS; i++)
+     {
+      string name = "TLBreak_Panel_Row" + IntegerToString(i);
+      if(ObjectFind(0, name) < 0)
+        {
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+         ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 20);
+         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 26 + i * 16);
+         ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+         ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+        }
+     }
+  }
+
+void SetPanelRow(int i, string text, color clr)
+  {
+   string name = "TLBreak_Panel_Row" + IntegerToString(i);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+  }
+
+void RemovePanelObjects()
+  {
+   ObjectsDeleteAll(0, "TLBreak_Panel_");
+  }
+
+void UpdatePanel()
+  {
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   string statusText;
+   color  statusColor;
+   if(accountBlownProtection)      { statusText = "DETENIDO (drawdown maximo)"; statusColor = clrRed; }
+   else if(dailyProtectionActive)  { statusText = "PAUSADO HOY (perdida diaria)"; statusColor = clrOrange; }
+   else if(consecutiveLosses >= MaxConsecutiveLosses) { statusText = "PAUSADO (" + IntegerToString(consecutiveLosses) + " SL seguidos)"; statusColor = clrOrange; }
+   else if(PositionSelect(_Symbol))
+     {
+      long ptype = PositionGetInteger(POSITION_TYPE);
+      statusText = (ptype == POSITION_TYPE_BUY) ? "EN LONG" : "EN SHORT";
+      statusColor = (ptype == POSITION_TYPE_BUY) ? clrLime : clrRed;
+     }
+   else if(gTouchingRes) { statusText = "Tocando resistencia..."; statusColor = clrYellow; }
+   else if(gTouchingSup) { statusText = "Tocando soporte...";     statusColor = clrYellow; }
+   else                  { statusText = "Escaneando mercado...";  statusColor = clrSilver; }
+
+   SetPanelRow(0, "== TrendlineBreak EA - " + _Symbol + " ==", clrAqua);
+   SetPanelRow(1, "Estado: " + statusText, statusColor);
+   SetPanelRow(2, "Precio: " + DoubleToString(price, _Digits), clrWhite);
+
+   if(gHaveRes)
+     {
+      double distATR = (gAtr > 0) ? (gResNow - price) / gAtr : 0;
+      SetPanelRow(3, "Resistencia: " + DoubleToString(gResNow, _Digits) + "  (" + DoubleToString(distATR, 2) + " ATR)", clrTomato);
+     }
+   else SetPanelRow(3, "Resistencia: n/a (esperando pivotes)", clrGray);
+
+   if(gHaveSup)
+     {
+      double distATR = (gAtr > 0) ? (price - gSupNow) / gAtr : 0;
+      SetPanelRow(4, "Soporte: " + DoubleToString(gSupNow, _Digits) + "  (" + DoubleToString(distATR, 2) + " ATR)", clrLime);
+     }
+   else SetPanelRow(4, "Soporte: n/a (esperando pivotes)", clrGray);
+
+   if(PositionSelect(_Symbol))
+     {
+      double vol   = PositionGetDouble(POSITION_VOLUME);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+      long   ptype = PositionGetInteger(POSITION_TYPE);
+      double riskDist = MathAbs(entry - sl);
+      double liveR = (riskDist > 0) ? ((ptype == POSITION_TYPE_BUY) ? (price - entry) / riskDist : (entry - price) / riskDist) : 0;
+
+      SetPanelRow(5, "Posicion: " + DoubleToString(vol, 2) + " lotes @ " + DoubleToString(entry, _Digits), clrWhite);
+      SetPanelRow(6, "SL/TP: " + DoubleToString(sl, _Digits) + " / " + DoubleToString(tp, _Digits), clrWhite);
+      SetPanelRow(7, "R actual: " + DoubleToString(liveR, 2) + "R  (objetivo 1:" + DoubleToString(RR_Multiplier, 1) + ")", liveR >= 0 ? clrLime : clrTomato);
+     }
+   else
+     {
+      SetPanelRow(5, "Posicion: sin posicion abierta", clrGray);
+      SetPanelRow(6, "SL/TP: n/a", clrGray);
+      SetPanelRow(7, "R actual: n/a", clrGray);
+     }
+
+   string signalAge = "";
+   if(lastSignalTime > 0)
+     {
+      int barsAgo = iBarShift(_Symbol, PERIOD_CURRENT, lastSignalTime, false);
+      signalAge = " (" + IntegerToString(barsAgo) + " velas atras)";
+     }
+   SetPanelRow(8, "Ultima senal: " + lastSignalReason + signalAge, clrWhite);
+
+   MaybeRolloverDay();
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double dailyLossPct = (dayStartBalance > 0) ? (dayStartBalance - equity) / dayStartBalance * 100.0 : 0.0;
+   double drawdownPct  = (peakEquity > 0)      ? (peakEquity - equity) / peakEquity * 100.0           : 0.0;
+   SetPanelRow(9,  "Perdida diaria: " + DoubleToString(MathMax(dailyLossPct, 0), 2) + "% / limite " + DoubleToString(DailyLossLimitPercent, 1) + "%", dailyLossPct > DailyLossLimitPercent * 0.7 ? clrOrange : clrWhite);
+   SetPanelRow(10, "Drawdown: " + DoubleToString(MathMax(drawdownPct, 0), 2) + "% / limite " + DoubleToString(MaxDrawdownPercent, 1) + "%", drawdownPct > MaxDrawdownPercent * 0.7 ? clrOrange : clrWhite);
   }
 
 //+------------------------------------------------------------------+
@@ -261,12 +404,12 @@ double CalcLotSize(double slDistancePrice)
   }
 
 //+------------------------------------------------------------------+
-//| Pivot detection - checks the bar that is PivotLookback bars back |
-//| from the last closed bar (shift 1), i.e. cShift = PivotLookback+1|
+//| Pivot detection at an arbitrary shift, so it can be reused both  |
+//| for the live "just closed a bar" check (cShift = PivotLookback+1)|
+//| and for scanning back through history on attach.                 |
 //+------------------------------------------------------------------+
-bool IsPivotHigh(double &pivotPrice, datetime &pivotTime)
+bool IsPivotHighAtShift(int cShift, double &pivotPrice, datetime &pivotTime)
   {
-   int cShift = PivotLookback + 1;
    double candidate = iHigh(_Symbol, PERIOD_CURRENT, cShift);
    for(int i = 1; i <= PivotLookback; i++)
      {
@@ -278,9 +421,8 @@ bool IsPivotHigh(double &pivotPrice, datetime &pivotTime)
    return(true);
   }
 
-bool IsPivotLow(double &pivotPrice, datetime &pivotTime)
+bool IsPivotLowAtShift(int cShift, double &pivotPrice, datetime &pivotTime)
   {
-   int cShift = PivotLookback + 1;
    double candidate = iLow(_Symbol, PERIOD_CURRENT, cShift);
    for(int i = 1; i <= PivotLookback; i++)
      {
@@ -290,6 +432,45 @@ bool IsPivotLow(double &pivotPrice, datetime &pivotTime)
    pivotPrice = candidate;
    pivotTime  = iTime(_Symbol, PERIOD_CURRENT, cShift);
    return(true);
+  }
+
+bool IsPivotHigh(double &pivotPrice, datetime &pivotTime) { return(IsPivotHighAtShift(PivotLookback + 1, pivotPrice, pivotTime)); }
+bool IsPivotLow(double &pivotPrice, datetime &pivotTime)  { return(IsPivotLowAtShift(PivotLookback + 1, pivotPrice, pivotTime)); }
+
+//+------------------------------------------------------------------+
+//| Scans back through already-existing history on attach, so the    |
+//| trendlines and panel show real data immediately instead of only  |
+//| after the EA "watches" two new pivots form bar by bar going      |
+//| forward (which on a slow timeframe could take hours).            |
+//+------------------------------------------------------------------+
+void FindRecentPivotsFromHistory()
+  {
+   int bars = Bars(_Symbol, PERIOD_CURRENT);
+   int maxShift = MathMin(bars - PivotLookback - 1, 2000);
+
+   int found = 0;
+   for(int shift = PivotLookback + 1; shift <= maxShift && found < 2; shift++)
+     {
+      double price; datetime t;
+      if(IsPivotHighAtShift(shift, price, t))
+        {
+         if(found == 0) { ph1 = price; phTime1 = t; }
+         else           { ph2 = price; phTime2 = t; }
+         found++;
+        }
+     }
+
+   found = 0;
+   for(int shift = PivotLookback + 1; shift <= maxShift && found < 2; shift++)
+     {
+      double price; datetime t;
+      if(IsPivotLowAtShift(shift, price, t))
+        {
+         if(found == 0) { pl1 = price; plTime1 = t; }
+         else           { pl2 = price; plTime2 = t; }
+         found++;
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -511,6 +692,9 @@ void ExecuteEntry(bool isLong, string reasonText)
    DrawTradeLabel(isLong, now, price, sl, tp, reasonText);
    DrawRPanel(isLong, now, price, sl, slDist);
 
+   lastSignalReason = (isLong ? "BUY " : "SELL ") + reasonText;
+   lastSignalTime    = now;
+
    if(EnablePushNotifications)
      {
       string msg = _Symbol + " " + (isLong ? "BUY" : "SELL") + " " + DoubleToString(lots, 2) +
@@ -567,20 +751,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 void OnTick()
   {
    // Runs on every tick (not just new bars) so an emergency close can react
-   // immediately if the account gets close to the prop firm's limits.
+   // immediately if the account gets close to the prop firm's limits, and
+   // so the panel's price/status stay live between bar closes.
    CheckAccountProtection();
+   UpdatePanel();
 
    static datetime lastBarTime = 0;
    datetime barTime = iTime(_Symbol, PERIOD_CURRENT, 0);
    bool isNewBar = (barTime != lastBarTime);
    if(!isNewBar) return;
    lastBarTime = barTime;
-
-   string status = accountBlownProtection ? "DETENIDO - drawdown maximo alcanzado (reinicia el EA solo tras confirmar con FTUK)"
-                 : dailyProtectionActive  ? "PAUSADO HOY - limite de perdida diaria alcanzado (se reanuda mañana)"
-                 : (consecutiveLosses >= MaxConsecutiveLosses) ? "PAUSADO - " + IntegerToString(consecutiveLosses) + " SL seguidos (se reanuda mañana)"
-                 : "activo (" + IntegerToString(consecutiveLosses) + "/" + IntegerToString(MaxConsecutiveLosses) + " SL seguidos)";
-   Comment("TrendlineBreak EA - " + status);
 
    // --- Update pivots (checked once per new closed bar) ---
    double newPh, newPl;
@@ -603,6 +783,8 @@ void OnTick()
    // --- Compute trendline projections and check for a reaction on the last two closed bars ---
    bool haveRes = (phTime1 != 0 && phTime2 != 0 && phTime1 != phTime2);
    bool haveSup = (plTime1 != 0 && plTime2 != 0 && plTime1 != plTime2);
+   gHaveRes = haveRes;
+   gHaveSup = haveSup;
 
    datetime tPrev = iTime(_Symbol, PERIOD_CURRENT, 2);
    datetime tCurr = iTime(_Symbol, PERIOD_CURRENT, 1);
@@ -610,6 +792,7 @@ void OnTick()
    double closeCurr = iClose(_Symbol, PERIOD_CURRENT, 1);
 
    double atr = GetATR();
+   gAtr = atr;
    double touchTol = atr * TouchATRMultiplier;
    double bufferPrice = BreakoutBufferPoints * _Point;
 
@@ -621,6 +804,8 @@ void OnTick()
       double resSlope  = (ph1 - ph2) / (double)(phTime1 - phTime2);
       double resAtCurr = LineValueAt(ph1, resSlope, phTime1, tCurr);
       if(DrawTrendlines) DrawLine("TLBreak_Res", phTime2, ph2, tCurr, resAtCurr, clrRed);
+      gResNow = resAtCurr;
+      gTouchingRes = TouchingResistance(resAtCurr, touchTol);
 
       if(!resReacted)
         {
@@ -647,6 +832,8 @@ void OnTick()
       double supSlope  = (pl1 - pl2) / (double)(plTime1 - plTime2);
       double supAtCurr = LineValueAt(pl1, supSlope, plTime1, tCurr);
       if(DrawTrendlines) DrawLine("TLBreak_Sup", plTime2, pl2, tCurr, supAtCurr, clrLime);
+      gSupNow = supAtCurr;
+      gTouchingSup = TouchingSupport(supAtCurr, touchTol);
 
       if(!supReacted)
         {

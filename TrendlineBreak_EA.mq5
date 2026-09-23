@@ -1,12 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                   XAUUSD_TrendlineBreak_EA.mq5    |
-//|  Gold (XAUUSD) Trendline Break EA - stop & reverse                |
+//|                                        TrendlineBreak_EA.mq5      |
+//|  Trendline Break EA - stop & reverse (multi-instrument)           |
 //|                                                                    |
 //|  Own implementation of the classic pivot-based dynamic trendline  |
 //|  break concept (same idea as oscillators that plot a green dot on |
 //|  a bullish trendline break and a red dot on a bearish break).     |
 //|  This is NOT a port of any third-party proprietary indicator -    |
-//|  it is written independently so it can run fully automated.       |
+//|  it is written independently so it can run fully automated. Not   |
+//|  tied to any single symbol - originally built for XAUUSD, also    |
+//|  validated on indices such as US30.                               |
 //|                                                                    |
 //|  Logic (v2 - "reaction at the line"):                             |
 //|   - Detect confirmed pivot highs/lows (PivotLookback bars each     |
@@ -29,12 +31,21 @@
 //|   - An automatic R-multiple visual panel (entry / SL / 1R..NR      |
 //|     levels + profit-loss shading) is drawn on every entry.        |
 //|                                                                    |
+//|  Risk management:                                                 |
+//|   - Position size targets a fixed dollar risk per trade (default  |
+//|     $50), with a hard lot-size cap as a second safety net.        |
+//|   - A circuit breaker pauses new entries after N consecutive      |
+//|     stop-loss hits (default 2), resuming automatically the next   |
+//|     calendar day.                                                 |
+//|   - Optional push notifications on every open/close (MetaQuotes   |
+//|     ID must be linked in Tools > Options > Notifications).        |
+//|                                                                    |
 //|  Educational / research template. Backtest and forward-test on    |
 //|  demo before using with real capital. No strategy is guaranteed   |
 //|  to be profitable.                                                |
 //+------------------------------------------------------------------+
-#property copyright "Custom EA - Trendline Break Stop & Reverse (XAUUSD)"
-#property version   "2.00"
+#property copyright "Custom EA - Trendline Break Stop & Reverse"
+#property version   "3.00"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -49,9 +60,8 @@ enum ENUM_ENTRY_MODE
 
 //====================== INPUTS ======================================
 input group "=== General ==="
-input bool   EnforceGoldSymbol      = true;
 input ulong  MagicNumber            = 20260912;
-input string TradeComment           = "TLBreak-XAU";
+input string TradeComment           = "TLBreak";
 input double MaxSpreadPoints        = 500;
 
 input group "=== Trendline ==="
@@ -65,10 +75,22 @@ input bool             UseEngulfingPattern  = true;   // confirm bounce with eng
 input bool             UsePinBarPattern     = true;   // confirm bounce with pin bar (hammer / shooting star)
 
 input group "=== Risk / Stop Loss / Take Profit ==="
-input double RiskPercent            = 1.0;
 input double SL_ATR_Multiplier      = 1.5;
 input double RR_Multiplier          = 3.0;
 input int    ATR_Period             = 14;
+
+input group "=== Position Sizing (your account) ==="
+input bool   UseFixedRiskUSD        = true;   // true = risk a fixed $ amount per trade; false = risk % of balance
+input double FixedRiskUSD           = 50.0;   // $ risked per trade when UseFixedRiskUSD is on
+input double RiskPercent            = 1.0;    // used only when UseFixedRiskUSD is off
+input double MaxLotSize             = 5.0;    // hard cap - never trade more than this, whatever the risk calc says
+
+input group "=== Loss Circuit Breaker ==="
+input int    MaxConsecutiveLosses   = 2;      // pause new entries after this many stop-loss hits in a row
+                                               // (auto-resumes at the start of the next calendar day)
+
+input group "=== Notifications ==="
+input bool   EnablePushNotifications = true;  // requires a MetaQuotes ID linked in Tools > Options > Notifications
 
 input group "=== Chart Visuals ==="
 input bool   DrawTrendlines         = true;
@@ -87,15 +109,12 @@ bool supReacted = false;
 
 int atrHandle = INVALID_HANDLE;
 
+int      consecutiveLosses = 0;
+datetime lastResetDay      = 0;
+
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   if(EnforceGoldSymbol && StringFind(_Symbol, "XAU") < 0)
-     {
-      Alert("This EA is restricted to XAU (Gold) symbols. Attach it to a XAUUSD-type chart, or disable EnforceGoldSymbol.");
-      return(INIT_FAILED);
-     }
-
    atrHandle = iATR(_Symbol, PERIOD_CURRENT, ATR_Period);
    if(atrHandle == INVALID_HANDLE)
      {
@@ -113,6 +132,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
+   Comment("");
   }
 
 //+------------------------------------------------------------------+
@@ -129,10 +149,32 @@ bool SpreadOK()
    return(spreadPts <= MaxSpreadPoints);
   }
 
+//+------------------------------------------------------------------+
+//| Loss circuit breaker - resets automatically on a new calendar day|
+//+------------------------------------------------------------------+
+void MaybeResetDailyCounter()
+  {
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime today = StructToTime(dt);
+   if(today != lastResetDay)
+     {
+      consecutiveLosses = 0;
+      lastResetDay = today;
+     }
+  }
+
+bool TradingPaused()
+  {
+   MaybeResetDailyCounter();
+   return(consecutiveLosses >= MaxConsecutiveLosses);
+  }
+
+//+------------------------------------------------------------------+
 double CalcLotSize(double slDistancePrice)
   {
-   double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskMoney = balance * RiskPercent / 100.0;
+   double riskMoney = UseFixedRiskUSD ? FixedRiskUSD : (AccountInfoDouble(ACCOUNT_BALANCE) * RiskPercent / 100.0);
 
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -150,6 +192,7 @@ double CalcLotSize(double slDistancePrice)
 
    lots = MathFloor(lots / stepLot) * stepLot;
    lots = MathMax(minLot, MathMin(maxLot, lots));
+   lots = MathMin(lots, MaxLotSize);   // hard cap for this account, regardless of the risk calc above
    return(lots);
   }
 
@@ -366,6 +409,9 @@ void DrawRPanel(bool isLong, datetime t, double entry, double sl, double slDist)
 //+------------------------------------------------------------------+
 void ExecuteEntry(bool isLong, string reasonText)
   {
+   if(TradingPaused())
+      return; // circuit breaker: too many consecutive stop-losses today
+
    // Close opposite position first (stop & reverse)
    if(PositionSelect(_Symbol))
      {
@@ -400,6 +446,57 @@ void ExecuteEntry(bool isLong, string reasonText)
                                          : SymbolInfoDouble(_Symbol, SYMBOL_ASK) + atr * 0.3);
    DrawTradeLabel(isLong, now, price, sl, tp, reasonText);
    DrawRPanel(isLong, now, price, sl, slDist);
+
+   if(EnablePushNotifications)
+     {
+      string msg = _Symbol + " " + (isLong ? "BUY" : "SELL") + " " + DoubleToString(lots, 2) +
+                   " lotes @ " + DoubleToString(price, _Digits) +
+                   " | SL " + DoubleToString(sl, _Digits) + " TP " + DoubleToString(tp, _Digits) +
+                   " | " + reasonText + " | riesgo $" + DoubleToString(UseFixedRiskUSD ? FixedRiskUSD : 0, 2);
+      SendNotification(msg);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Fires on every deal (open or close). Used here to track the loss |
+//| circuit breaker and to push a notification when a position       |
+//| closes - regardless of whether it closed by SL, TP, or manually  |
+//| (including our own stop & reverse).                               |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest      &request,
+                        const MqlTradeResult       &result)
+  {
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(!HistoryDealSelect(trans.deal)) return;
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != (long)MagicNumber) return;
+
+   long dealEntry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY) return; // only care about closing deals
+
+   double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+                 + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+                 + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+   long reasonCode = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+
+   MaybeResetDailyCounter();
+
+   bool wasSL = (reasonCode == DEAL_REASON_SL);
+   bool wasTP = (reasonCode == DEAL_REASON_TP);
+
+   if(wasSL)
+      consecutiveLosses++;
+   else if(profit > 0)
+      consecutiveLosses = 0;
+
+   if(EnablePushNotifications)
+     {
+      string reasonStr = wasSL ? "STOP LOSS" : wasTP ? "TAKE PROFIT" : "Manual/Reversa";
+      string msg = _Symbol + " CERRADA (" + reasonStr + ") P/L: " + DoubleToString(profit, 2) +
+                   " | SL seguidos: " + IntegerToString(consecutiveLosses) + "/" + IntegerToString(MaxConsecutiveLosses);
+      SendNotification(msg);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -410,6 +507,11 @@ void OnTick()
    bool isNewBar = (barTime != lastBarTime);
    if(!isNewBar) return;
    lastBarTime = barTime;
+
+   MaybeResetDailyCounter();
+   Comment(TradingPaused()
+      ? "TrendlineBreak EA - PAUSADO (" + IntegerToString(consecutiveLosses) + " SL seguidos, se reanuda mañana)"
+      : "TrendlineBreak EA - activo (" + IntegerToString(consecutiveLosses) + "/" + IntegerToString(MaxConsecutiveLosses) + " SL seguidos)");
 
    // --- Update pivots (checked once per new closed bar) ---
    double newPh, newPl;

@@ -59,6 +59,8 @@ Dos sistemas independientes, sobre **oro (XAUUSD)** únicamente:
 
 Nace de la pregunta: "¿cómo automatizo entradas cuando aparece un punto verde/rojo en un oscilador de ruptura de líneas de tendencia (tipo LuxAlgo)?". Respuesta corta: **no se puede "escuchar" directamente los puntos de un indicador de terceros** desde otro script — en Pine, `input.source()` solo puede leer valores dibujados con `plot()`, y esos puntos casi siempre se dibujan con `plotshape()`/`plotchar()`, que no son enlazables. Por eso se construyó una versión propia, con la misma idea visual y de trading, pero de código 100% nuestro y totalmente automatizable.
 
+**Multi-instrumento**: aunque nació para XAUUSD, el EA (`TrendlineBreak_EA.mq5`) ya no exige un símbolo específico — se ha validado también en índices como US30. Ajusta los parámetros (buffer, ATR, tolerancia de toque) por instrumento, ya que el comportamiento de precio no es igual en oro que en índices.
+
 ## Lógica (v2 — "reacción en la línea")
 
 1. Se detectan pivotes de máximo/mínimo confirmados (`PivotLookback` velas a cada lado).
@@ -75,8 +77,8 @@ Nace de la pregunta: "¿cómo automatizo entradas cuando aparece un punto verde/
 
 ## Archivos
 
-- [XAUUSD_TrendlineBreak_EA.mq5](XAUUSD_TrendlineBreak_EA.mq5) — EA para MT5: detecta ruptura y rebote, opera stop & reverse de forma automática, y dibuja las líneas de tendencia, las señales y el panel de R-múltiplos en el gráfico.
-- [XAUUSD_TrendlineBreak.pine](XAUUSD_TrendlineBreak.pine) — Script Pine v5 para TradingView: misma lógica de ruptura/rebote, etiquetas de entrada mejoradas (motivo, entrada, SL, TP, R:R), panel automático de R-múltiplos, y corre como `strategy()` para backtest.
+- [TrendlineBreak_EA.mq5](TrendlineBreak_EA.mq5) — EA para MT5: detecta ruptura y rebote, opera stop & reverse de forma automática, dibuja las líneas de tendencia/señales/panel de R-múltiplos, y trae gestión de riesgo para cuenta real (ver abajo).
+- [XAUUSD_TrendlineBreak.pine](XAUUSD_TrendlineBreak.pine) — Script Pine v5 para TradingView: misma lógica de ruptura/rebote, etiquetas de entrada compactas, panel de escaneo en vivo, filtro opcional de horario, y corre como `strategy()` para backtest.
 
 ## Parámetros nuevos de la v2
 
@@ -84,6 +86,15 @@ Nace de la pregunta: "¿cómo automatizo entradas cuando aparece un punto verde/
 - `useEngulfing` / `UseEngulfingPattern` y `usePinBar` / `UsePinBarPattern`: qué patrones de vela confirman el rebote.
 - `showRPanel` / `ShowRPanel`, `maxRLevels` / `MaxRLevels`, `panelBarsRight` / `PanelBars`: controlan el panel visual de R-múltiplos.
 - Si ves demasiadas señales de rebote de baja calidad, sube `touchATRMult` (toque más exigente) o desactiva uno de los dos patrones de vela para hacerlo más selectivo — el mismo principio de "todas las confluencias" del sistema de sesión aplica aquí.
+- Pine: `useTimeFilter` (apagado por defecto) restringe las entradas a una ventana horaria configurable (`sessionWindow`, `sessionTZ`) — útil para cortar horarios muertos por instrumento. La detección de líneas sigue corriendo fuera de la ventana; solo se bloquea la ejecución de la orden.
+
+## Gestión de riesgo del EA (v3, cuenta real)
+
+- **Riesgo fijo en dólares**: `UseFixedRiskUSD` (activado por defecto) + `FixedRiskUSD` (por defecto $50) — el tamaño de posición se calcula para que, si se toca el SL, la pérdida sea ese monto exacto, sin importar el balance de la cuenta. Si prefieres volver a riesgo por porcentaje de balance, apaga `UseFixedRiskUSD` y ajusta `RiskPercent`.
+- **Tope de lotaje**: `MaxLotSize` — límite duro de lotes por operación, se aplica siempre, sin importar lo que calcule el riesgo en dólares. Ajústalo al tamaño de tu cuenta FTUK.
+- **Freno de pérdidas consecutivas**: `MaxConsecutiveLosses` (por defecto 2) — tras esa cantidad de SL seguidos (detectados vía `OnTradeTransaction`, no importa si fue por SL o por la reversa del EA), se pausan nuevas entradas hasta el inicio del siguiente día calendario. El estado se ve en el `Comment()` del gráfico ("activo" / "PAUSADO").
+- **Notificaciones push**: `EnablePushNotifications` (activado por defecto) — manda un push a tu celular al abrir cada operación (símbolo, dirección, lotes, SL/TP, motivo) y al cerrarla (motivo: SL/TP/manual, P/L, conteo de SL seguidos). Requiere vincular tu MetaQuotes ID: en MT5 ve a `Herramientas → Opciones → Notificaciones`, marca "Habilitar notificaciones push" e ingresa el ID que te muestra la app de MetaTrader en tu celular (pestaña "Mensajes" → ícono de engranaje).
+- Los ratios de riesgo:beneficio (`RR_Multiplier`) y el SL base en ATR (`SL_ATR_Multiplier`) no cambiaron — la gestión de riesgo nueva solo controla el tamaño de la posición y cuándo se permite operar, no la distancia del SL/TP en sí.
 
 ## Instalación
 

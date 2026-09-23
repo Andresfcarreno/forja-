@@ -192,9 +192,10 @@ void EnsurePanelObjects()
      {
       ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
       ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
       ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, 10);
       ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, 20);
-      ObjectSetInteger(0, bg, OBJPROP_XSIZE, 300);
+      ObjectSetInteger(0, bg, OBJPROP_XSIZE, 320);
       ObjectSetInteger(0, bg, OBJPROP_YSIZE, 14 + PANEL_ROWS * 16);
       ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'20,20,20');
       ObjectSetInteger(0, bg, OBJPROP_BORDER_COLOR, clrGray);
@@ -211,6 +212,10 @@ void EnsurePanelObjects()
         {
          ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
          ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+         // Text grows LEFTWARD from the anchor point (right-aligned), so it
+         // stays inside the visible chart instead of running off the right
+         // edge of the screen - that was the "cut off after 3 letters" bug.
+         ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
          ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 20);
          ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 26 + i * 16);
          ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);

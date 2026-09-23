@@ -56,6 +56,11 @@ touchATRMult   = input.float(0.35, "Touch tolerance for bounce (x ATR)", step=0.
 useEngulfing   = input.bool(true, "Confirm bounce with Engulfing pattern", group="Entry Logic")
 usePinBar      = input.bool(true, "Confirm bounce with Pin Bar (hammer / shooting star)", group="Entry Logic")
 
+useTimeFilter  = input.bool(false, "Only trade within a session window (cuts dead hours)", group="Time Filter")
+sessionWindow  = input.session("0930-1600", "Trading window", group="Time Filter",
+     tooltip="Trades only fire while price is inside this window. Tune per instrument - e.g. US30/indices tend to be live during the NY cash session, gold has its own active hours. Line detection still runs outside the window, it just won't open trades.")
+sessionTZ      = input.string("America/New_York", "Timezone for trading window", group="Time Filter")
+
 slATRMult  = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
 rrMult     = input.float(3.0, "Risk:Reward multiple (TP = SL distance x this)", group="Risk / SL / TP")
 atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
@@ -147,11 +152,18 @@ if breakoutLong or bounceShort
 if breakoutShort or bounceLong
     supReacted := true
 
-finalLong  = breakoutLong or bounceLong
-finalShort = breakoutShort or bounceShort
+// The line still "reacts" (and stops re-firing) outside the trading window above -
+// only the actual trade execution is gated here, so a stale signal from a dead hour
+// can't suddenly fire once the window opens again.
+inSession = not useTimeFilter or not na(time(timeframe.period, sessionWindow, sessionTZ))
+
+finalLong  = (breakoutLong or bounceLong) and inSession
+finalShort = (breakoutShort or bounceShort) and inSession
 
 reasonLong  = breakoutLong ? "Breakout @ Resistance" : "Bounce @ Support"
 reasonShort = breakoutShort ? "Breakout @ Support" : "Bounce @ Resistance"
+
+bgcolor(useTimeFilter and inSession ? color.new(color.blue, 94) : na, title="Trading window shading")
 
 // ===================== VISUALS: TRENDLINES ==============================
 var line resLine = na
@@ -284,14 +296,16 @@ liveR    = (not inPosition or na(riskDist) or riskDist == 0) ? na :
      (isLongPos ? (close - lastEntry) / riskDist : (lastEntry - close) / riskDist)
 
 statusText  = inPosition ? (isLongPos ? "EN LONG" : "EN SHORT") :
+     (useTimeFilter and not inSession) ? "Fuera de horario" :
      touchingResistance ? "Tocando resistencia..." :
      touchingSupport ? "Tocando soporte..." :
      "Escaneando mercado..."
-statusColor = inPosition ? (isLongPos ? color.new(color.green, 10) : color.new(color.red, 10)) : color.new(color.gray, 20)
+statusColor = inPosition ? (isLongPos ? color.new(color.green, 10) : color.new(color.red, 10)) :
+     (useTimeFilter and not inSession) ? color.new(color.gray, 40) : color.new(color.gray, 20)
 
 barsAgo = na(lastSignalBar) ? na : bar_index - lastSignalBar
 
-var table livePanel = table.new(position.top_right, 2, 9, border_width=1)
+var table livePanel = table.new(position.top_right, 2, 10, border_width=1)
 if showLivePanel and barstate.islast
     table.cell(livePanel, 0, 0, "Estado", text_color=color.white, bgcolor=color.gray, text_size=tSize)
     table.cell(livePanel, 1, 0, statusText, text_color=color.white, bgcolor=statusColor, text_size=tSize)
@@ -319,3 +333,6 @@ if showLivePanel and barstate.islast
 
     table.cell(livePanel, 0, 8, "Modo / Patrones", text_color=color.white, bgcolor=color.gray, text_size=tSize)
     table.cell(livePanel, 1, 8, entryMode + " · " + (useEngulfing ? "Engulfing " : "") + (usePinBar ? "PinBar" : ""), text_color=color.white, bgcolor=color.navy, text_size=tSize)
+
+    table.cell(livePanel, 0, 9, "Ventana horaria", text_color=color.white, bgcolor=color.gray, text_size=tSize)
+    table.cell(livePanel, 1, 9, useTimeFilter ? sessionWindow + " " + sessionTZ + (inSession ? " (activa)" : " (cerrada)") : "Desactivada", text_color=color.white, bgcolor=color.navy, text_size=tSize)

@@ -89,6 +89,14 @@ input group "=== Loss Circuit Breaker ==="
 input int    MaxConsecutiveLosses   = 2;      // pause new entries after this many stop-loss hits in a row
                                                // (auto-resumes at the start of the next calendar day)
 
+input group "=== Account Protection (prop firm limits) ==="
+input double DailyLossLimitPercent  = 3.5;    // % of the day's starting balance - stop trading for the day if hit
+                                               // (set below your firm's actual daily drawdown limit, for buffer)
+input double MaxDrawdownPercent     = 7.0;    // % below the highest equity seen - halts the EA entirely if hit
+                                               // (set below your firm's actual max drawdown limit, for buffer)
+input bool   CloseOnProtectionTrigger = true; // immediately close any open position when a limit is hit,
+                                               // instead of waiting for its own SL
+
 input group "=== Notifications ==="
 input bool   EnablePushNotifications = true;  // requires a MetaQuotes ID linked in Tools > Options > Notifications
 
@@ -112,6 +120,11 @@ int atrHandle = INVALID_HANDLE;
 int      consecutiveLosses = 0;
 datetime lastResetDay      = 0;
 
+double   dayStartBalance       = 0;
+double   peakEquity            = 0;
+bool     dailyProtectionActive = false;
+bool     accountBlownProtection = false;
+
 //+------------------------------------------------------------------+
 int OnInit()
   {
@@ -124,6 +137,9 @@ int OnInit()
 
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetTypeFillingBySymbol(_Symbol);
+
+   peakEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
+   dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
    return(INIT_SUCCEEDED);
   }
@@ -150,9 +166,12 @@ bool SpreadOK()
   }
 
 //+------------------------------------------------------------------+
-//| Loss circuit breaker - resets automatically on a new calendar day|
+//| Daily rollover - resets the consecutive-loss counter and the     |
+//| day's starting balance (used by the daily loss limit) once per   |
+//| calendar day. Does NOT reset the max-drawdown protection, which  |
+//| is meant to be permanent for the life of this EA run.            |
 //+------------------------------------------------------------------+
-void MaybeResetDailyCounter()
+void MaybeRolloverDay()
   {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
@@ -160,14 +179,59 @@ void MaybeResetDailyCounter()
    datetime today = StructToTime(dt);
    if(today != lastResetDay)
      {
-      consecutiveLosses = 0;
-      lastResetDay = today;
+      consecutiveLosses      = 0;
+      dayStartBalance        = AccountInfoDouble(ACCOUNT_BALANCE);
+      dailyProtectionActive  = false;
+      lastResetDay           = today;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Account protection - mirrors the prop firm's daily and max        |
+//| drawdown limits, with a safety buffer, so this EA never has to    |
+//| rely on the firm's own risk desk closing the account for us.      |
+//| Max-drawdown is measured from the highest equity seen (trailing), |
+//| which is the more conservative reading whether the firm's own    |
+//| rule is trailing or static from the initial balance.              |
+//+------------------------------------------------------------------+
+void EmergencyStop(string reasonLabel)
+  {
+   if(CloseOnProtectionTrigger && PositionSelect(_Symbol))
+      trade.PositionClose(_Symbol);
+
+   string msg = "PROTECCION DE CUENTA: limite de " + reasonLabel + " alcanzado. Trading detenido.";
+   Print(msg);
+   if(EnablePushNotifications) SendNotification(msg);
+  }
+
+void CheckAccountProtection()
+  {
+   MaybeRolloverDay();
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity > peakEquity) peakEquity = equity;
+
+   double dailyLossPct = (dayStartBalance > 0) ? (dayStartBalance - equity) / dayStartBalance * 100.0 : 0.0;
+   double drawdownPct  = (peakEquity > 0)      ? (peakEquity - equity) / peakEquity * 100.0           : 0.0;
+
+   if(!accountBlownProtection && drawdownPct >= MaxDrawdownPercent)
+     {
+      accountBlownProtection = true;
+      EmergencyStop("DRAWDOWN MAXIMO (" + DoubleToString(MaxDrawdownPercent, 1) + "%)");
+     }
+
+   if(!dailyProtectionActive && dailyLossPct >= DailyLossLimitPercent)
+     {
+      dailyProtectionActive = true;
+      EmergencyStop("PERDIDA DIARIA (" + DoubleToString(DailyLossLimitPercent, 1) + "%)");
      }
   }
 
 bool TradingPaused()
   {
-   MaybeResetDailyCounter();
+   MaybeRolloverDay();
+   if(accountBlownProtection) return(true);
+   if(dailyProtectionActive)  return(true);
    return(consecutiveLosses >= MaxConsecutiveLosses);
   }
 
@@ -480,7 +544,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                  + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
    long reasonCode = HistoryDealGetInteger(trans.deal, DEAL_REASON);
 
-   MaybeResetDailyCounter();
+   MaybeRolloverDay();
 
    bool wasSL = (reasonCode == DEAL_REASON_SL);
    bool wasTP = (reasonCode == DEAL_REASON_TP);
@@ -502,16 +566,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // Runs on every tick (not just new bars) so an emergency close can react
+   // immediately if the account gets close to the prop firm's limits.
+   CheckAccountProtection();
+
    static datetime lastBarTime = 0;
    datetime barTime = iTime(_Symbol, PERIOD_CURRENT, 0);
    bool isNewBar = (barTime != lastBarTime);
    if(!isNewBar) return;
    lastBarTime = barTime;
 
-   MaybeResetDailyCounter();
-   Comment(TradingPaused()
-      ? "TrendlineBreak EA - PAUSADO (" + IntegerToString(consecutiveLosses) + " SL seguidos, se reanuda mañana)"
-      : "TrendlineBreak EA - activo (" + IntegerToString(consecutiveLosses) + "/" + IntegerToString(MaxConsecutiveLosses) + " SL seguidos)");
+   string status = accountBlownProtection ? "DETENIDO - drawdown maximo alcanzado (reinicia el EA solo tras confirmar con FTUK)"
+                 : dailyProtectionActive  ? "PAUSADO HOY - limite de perdida diaria alcanzado (se reanuda mañana)"
+                 : (consecutiveLosses >= MaxConsecutiveLosses) ? "PAUSADO - " + IntegerToString(consecutiveLosses) + " SL seguidos (se reanuda mañana)"
+                 : "activo (" + IntegerToString(consecutiveLosses) + "/" + IntegerToString(MaxConsecutiveLosses) + " SL seguidos)";
+   Comment("TrendlineBreak EA - " + status);
 
    // --- Update pivots (checked once per new closed bar) ---
    double newPh, newPl;

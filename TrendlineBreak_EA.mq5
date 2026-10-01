@@ -76,8 +76,11 @@ input bool             UsePinBarPattern     = true;   // confirm bounce with pin
 
 input group "=== Weekend Gap Protection ==="
 input bool   CloseBeforeWeekend     = true;   // close any open position and block new entries before the weekly close
-input int    FridayCloseHour        = 20;     // hour (0-23, SERVER/broker time) on Friday to start blocking/closing
-                                               // a backtested weekend-held trade lost 7x its normal risk to a gap - check your broker's GMT offset
+input int    FridayCloseHour        = 15;     // hour (0-23, SERVER/broker time, NOT the TradingView chart's timezone) on
+                                               // Friday to start blocking/closing. Set to land at 3pm America/New_York -
+                                               // VERIFY your MT5 server's GMT offset (bottom-right clock in MT5 vs. real
+                                               // NY time) before relying on this; a backtested weekend-held trade lost
+                                               // 7x its normal risk to a gap, so getting this wrong matters.
 
 input group "=== Risk / Stop Loss / Take Profit ==="
 input double SL_ATR_Multiplier      = 1.5;
@@ -91,7 +94,7 @@ input double TrailATRMultiplier     = 1.5;    // once past breakeven, trail SL b
 
 input group "=== Position Sizing (your account) ==="
 input bool   UseFixedRiskUSD        = true;   // true = risk a fixed $ amount per trade; false = risk % of balance
-input double FixedRiskUSD           = 50.0;   // $ risked per trade when UseFixedRiskUSD is on
+input double FixedRiskUSD           = 30.0;   // $ risked per trade when UseFixedRiskUSD is on
 input double RiskPercent            = 1.0;    // used only when UseFixedRiskUSD is off
 input double MaxLotSize             = 5.0;    // hard cap - never trade more than this, whatever the risk calc says
 
@@ -101,9 +104,13 @@ input int    MaxConsecutiveLosses   = 2;      // pause new entries after this ma
 
 input group "=== Account Protection (prop firm limits) ==="
 input double DailyLossLimitPercent  = 2.5;    // % of the day's starting balance - stop trading for the day if hit
-                                               // (FTUK real limit is 4% daily - kept comfortably under 3% per account owner's instruction)
-input double MaxDrawdownPercent     = 7.0;    // % below the highest equity seen - halts the EA entirely if hit
-                                               // (set below your firm's actual max drawdown limit, for buffer)
+                                               // (FTUK Flex Funded real limit confirmed from the dashboard: $500 = 5% of a
+                                               // $10,000 account - kept under 3% per account owner's instruction)
+input double MaxDrawdownPercent     = 4.5;    // % below the highest equity seen (trailing) - halts the EA entirely if hit
+                                               // (FTUK Flex Funded real limit confirmed from the dashboard: $600 = 6% of a
+                                               // $10,000 account, trailing from the peak/watermark - this MUST stay below
+                                               // that 6%, or FTUK's own system closes the account before this protection
+                                               // ever reacts. Re-check this % if your account size or program changes.)
 input bool   CloseOnProtectionTrigger = true; // immediately close any open position when a limit is hit,
                                                // instead of waiting for its own SL
 input double MaxProfitPerTradeUSD   = 200.0;  // close a position immediately if its floating profit reaches this -

@@ -63,7 +63,7 @@ sessionTZ      = input.string("America/New_York", "Timezone for trading window",
 
 closeBeforeWeekend = input.bool(true, "Close positions before weekend (avoid gap risk)", group="Time Filter",
      tooltip="A position held into the weekend close can gap hugely on reopen - one such trade in backtest lost 7x its normal risk. Closes any open position and blocks new entries starting at the hour below on Friday (same timezone as the trading window), until the market reopens.")
-fridayCloseHour    = input.int(20, "Friday close hour (0-23)", minval=0, maxval=23, group="Time Filter")
+fridayCloseHour    = input.int(15, "Friday close hour (0-23)", minval=0, maxval=23, group="Time Filter")
 
 slATRMult  = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
 rrMult     = input.float(3.0, "Risk:Reward multiple (TP = SL distance x this)", group="Risk / SL / TP")
@@ -71,7 +71,7 @@ atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
 
 useFixedRiskUSD = input.bool(true, "Use fixed $ risk per trade (matches the MT5 EA)", group="Risk / SL / TP",
      tooltip="On: position size is calculated so a stop-loss hit always costs this many dollars, the same model TrendlineBreak_EA.mq5 uses live. Off: falls back to 100% of equity per trade (the old default) - on a high-priced instrument like an index, that sizes down to a tiny position and tiny $ P&L, understating what real fixed-risk trading would have made.")
-fixedRiskUSD    = input.float(50.0, "Risk per trade (USD)", group="Risk / SL / TP")
+fixedRiskUSD    = input.float(30.0, "Risk per trade (USD)", group="Risk / SL / TP")
 
 showRPanel     = input.bool(true, "Draw automatic R-multiple panel on entry", group="Visuals")
 maxRLevels     = input.int(5, "Max R levels to draw", minval=1, maxval=10, group="Visuals")

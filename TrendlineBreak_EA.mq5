@@ -76,11 +76,16 @@ input bool             UsePinBarPattern     = true;   // confirm bounce with pin
 
 input group "=== Weekend Gap Protection ==="
 input bool   CloseBeforeWeekend     = true;   // close any open position and block new entries before the weekly close
-input int    FridayCloseHour        = 15;     // hour (0-23, SERVER/broker time, NOT the TradingView chart's timezone) on
-                                               // Friday to start blocking/closing. Set to land at 3pm America/New_York -
-                                               // VERIFY your MT5 server's GMT offset (bottom-right clock in MT5 vs. real
-                                               // NY time) before relying on this; a backtested weekend-held trade lost
-                                               // 7x its normal risk to a gap, so getting this wrong matters.
+input int    FridayCloseHour        = 20;     // hour (0-23, SERVER/broker time, NOT the TradingView chart's timezone) on
+                                               // Friday to start blocking/closing. Calculated to land at 3pm America/
+                                               // New_York: account owner's PC is in Montreal, same Eastern Time zone as
+                                               // NY (local clock = NY time exactly), and the MT5 server clock was
+                                               // observed running +5h ahead of that local/NY clock -> server = NY+5h.
+                                               // RE-VERIFY after US/Canada DST ends (~first Sunday of November): if the
+                                               // broker's server doesn't shift with it, the +5h gap could change. A
+                                               // backtested weekend-held trade lost 7x its normal risk to a gap, so
+                                               // getting this wrong matters - check a real Friday against actual NY
+                                               // time (same as Montreal time) to confirm.
 
 input group "=== Risk / Stop Loss / Take Profit ==="
 input double SL_ATR_Multiplier      = 1.5;

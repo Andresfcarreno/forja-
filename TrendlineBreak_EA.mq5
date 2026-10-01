@@ -79,6 +79,11 @@ input double SL_ATR_Multiplier      = 1.5;
 input double RR_Multiplier          = 3.0;
 input int    ATR_Period             = 14;
 
+input group "=== Breakeven / Trailing ==="
+input bool   UseBreakevenTrail      = true;   // move SL to breakeven, then trail, once a trade is in profit
+input double BreakevenAtR           = 1.0;    // move SL to breakeven once price reaches this many R
+input double TrailATRMultiplier     = 1.5;    // once past breakeven, trail SL by ATR * this
+
 input group "=== Position Sizing (your account) ==="
 input bool   UseFixedRiskUSD        = true;   // true = risk a fixed $ amount per trade; false = risk % of balance
 input double FixedRiskUSD           = 50.0;   // $ risked per trade when UseFixedRiskUSD is on
@@ -90,12 +95,14 @@ input int    MaxConsecutiveLosses   = 2;      // pause new entries after this ma
                                                // (auto-resumes at the start of the next calendar day)
 
 input group "=== Account Protection (prop firm limits) ==="
-input double DailyLossLimitPercent  = 3.5;    // % of the day's starting balance - stop trading for the day if hit
-                                               // (set below your firm's actual daily drawdown limit, for buffer)
+input double DailyLossLimitPercent  = 2.5;    // % of the day's starting balance - stop trading for the day if hit
+                                               // (FTUK real limit is 4% daily - kept comfortably under 3% per account owner's instruction)
 input double MaxDrawdownPercent     = 7.0;    // % below the highest equity seen - halts the EA entirely if hit
                                                // (set below your firm's actual max drawdown limit, for buffer)
 input bool   CloseOnProtectionTrigger = true; // immediately close any open position when a limit is hit,
                                                // instead of waiting for its own SL
+input double MaxProfitPerTradeUSD   = 200.0;  // close a position immediately if its floating profit reaches this -
+                                               // safety net for a firm rule capping profit on a single closed trade
 
 input group "=== Notifications ==="
 input bool   EnablePushNotifications = true;  // requires a MetaQuotes ID linked in Tools > Options > Notifications
@@ -657,6 +664,61 @@ void DrawRPanel(bool isLong, datetime t, double entry, double sl, double slDist)
   }
 
 //+------------------------------------------------------------------+
+//| Manages an already-open position: moves SL to breakeven once the |
+//| trade reaches BreakevenAtR, then trails it by ATR; and enforces   |
+//| MaxProfitPerTradeUSD as a hard safety cap on a single trade's     |
+//| profit (closes immediately if hit, regardless of TP).             |
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+  {
+   if(!PositionSelect(_Symbol)) return;
+   if(PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber) return;
+
+   if(MaxProfitPerTradeUSD > 0 && PositionGetDouble(POSITION_PROFIT) >= MaxProfitPerTradeUSD)
+     {
+      trade.PositionClose(_Symbol);
+      return;
+     }
+
+   if(!UseBreakevenTrail) return;
+
+   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl    = PositionGetDouble(POSITION_SL);
+   double tp    = PositionGetDouble(POSITION_TP);
+   long   type  = PositionGetInteger(POSITION_TYPE);
+
+   double atr = GetATR();
+   if(atr <= 0) return;
+
+   double price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                               : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   double riskDist = MathAbs(entry - sl);
+   if(riskDist <= 0) return;
+
+   double rMultiple = (type == POSITION_TYPE_BUY) ? (price - entry) / riskDist
+                                                   : (entry - price) / riskDist;
+   if(rMultiple < BreakevenAtR) return;
+
+   double trail = atr * TrailATRMultiplier;
+   double newSL = sl;
+
+   if(type == POSITION_TYPE_BUY)
+     {
+      double candidate = MathMax(entry, price - trail);
+      if(candidate > sl) newSL = candidate;
+     }
+   else
+     {
+      double candidate = MathMin(entry, price + trail);
+      if(candidate < sl) newSL = candidate;
+     }
+
+   if(newSL != sl)
+      trade.PositionModify(_Symbol, newSL, tp);
+  }
+
+//+------------------------------------------------------------------+
 void ExecuteEntry(bool isLong, string reasonText)
   {
    if(TradingPaused())
@@ -759,6 +821,7 @@ void OnTick()
    // immediately if the account gets close to the prop firm's limits, and
    // so the panel's price/status stay live between bar closes.
    CheckAccountProtection();
+   ManageOpenPositions();
    UpdatePanel();
 
    static datetime lastBarTime = 0;

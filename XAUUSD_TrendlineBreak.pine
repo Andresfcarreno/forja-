@@ -61,6 +61,10 @@ sessionWindow  = input.session("0930-1600", "Trading window", group="Time Filter
      tooltip="Trades only fire while price is inside this window. Tune per instrument - e.g. US30/indices tend to be live during the NY cash session, gold has its own active hours. Line detection still runs outside the window, it just won't open trades.")
 sessionTZ      = input.string("America/New_York", "Timezone for trading window", group="Time Filter")
 
+closeBeforeWeekend = input.bool(true, "Close positions before weekend (avoid gap risk)", group="Time Filter",
+     tooltip="A position held into the weekend close can gap hugely on reopen - one such trade in backtest lost 7x its normal risk. Closes any open position and blocks new entries starting at the hour below on Friday (same timezone as the trading window), until the market reopens.")
+fridayCloseHour    = input.int(20, "Friday close hour (0-23)", minval=0, maxval=23, group="Time Filter")
+
 slATRMult  = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
 rrMult     = input.float(3.0, "Risk:Reward multiple (TP = SL distance x this)", group="Risk / SL / TP")
 atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
@@ -163,8 +167,15 @@ if breakoutShort or bounceLong
 // can't suddenly fire once the window opens again.
 inSession = not useTimeFilter or not na(time(timeframe.period, sessionWindow, sessionTZ))
 
-finalLong  = (breakoutLong or bounceLong) and inSession
-finalShort = (breakoutShort or bounceShort) and inSession
+// A position held into the weekly close can gap hugely over the weekend - this blocks
+// new entries and forces a close starting Friday at fridayCloseHour (sessionTZ).
+inWeekendCloseWindow = closeBeforeWeekend and dayofweek(time, sessionTZ) == dayofweek.friday and hour(time, sessionTZ) >= fridayCloseHour
+
+if inWeekendCloseWindow and strategy.position_size != 0
+    strategy.close_all(comment="Weekend close")
+
+finalLong  = (breakoutLong or bounceLong) and inSession and not inWeekendCloseWindow
+finalShort = (breakoutShort or bounceShort) and inSession and not inWeekendCloseWindow
 
 reasonLong  = breakoutLong ? "Breakout @ Resistance" : "Bounce @ Support"
 reasonShort = breakoutShort ? "Breakout @ Support" : "Bounce @ Resistance"
@@ -312,12 +323,14 @@ riskDist = (na(lastEntry) or na(lastSL)) ? na : math.abs(lastEntry - lastSL)
 liveR    = (not inPosition or na(riskDist) or riskDist == 0) ? na :
      (isLongPos ? (close - lastEntry) / riskDist : (lastEntry - close) / riskDist)
 
-statusText  = inPosition ? (isLongPos ? "EN LONG" : "EN SHORT") :
+statusText  = inWeekendCloseWindow ? "Cierre de fin de semana" :
+     inPosition ? (isLongPos ? "EN LONG" : "EN SHORT") :
      (useTimeFilter and not inSession) ? "Fuera de horario" :
      touchingResistance ? "Tocando resistencia..." :
      touchingSupport ? "Tocando soporte..." :
      "Escaneando mercado..."
-statusColor = inPosition ? (isLongPos ? color.new(color.green, 10) : color.new(color.red, 10)) :
+statusColor = inWeekendCloseWindow ? color.new(color.orange, 20) :
+     inPosition ? (isLongPos ? color.new(color.green, 10) : color.new(color.red, 10)) :
      (useTimeFilter and not inSession) ? color.new(color.gray, 40) : color.new(color.gray, 20)
 
 barsAgo = na(lastSignalBar) ? na : bar_index - lastSignalBar
@@ -356,11 +369,12 @@ if showLivePanel and barstate.islast
 
 // ===================== PERFORMANCE BY HOUR (no export needed) ===========
 // Reads strategy.closedtrades directly - every closed trade in this backtest,
-// bucketed by the hour (chart/exchange time) its entry fired. Answers "which
-// hours does this actually work in" without needing to export anything.
+// bucketed by the hour its entry fired, in sessionTZ (NOT syminfo.timezone -
+// that used to be off by ~1h from the chart's own displayed time on some
+// symbols/brokers, which silently mislabeled every hour in this table).
 var table hourlyPanel = table.new(position.bottom_right, 4, 25, border_width=1)
 if showHourlyStats and barstate.islast
-    table.cell(hourlyPanel, 0, 0, "Hora", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(hourlyPanel, 0, 0, "Hora (" + sessionTZ + ")", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
     table.cell(hourlyPanel, 1, 0, "Trades", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
     table.cell(hourlyPanel, 2, 0, "Win%", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
     table.cell(hourlyPanel, 3, 0, "P/L neto", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
@@ -377,7 +391,7 @@ if showHourlyStats and barstate.islast
         for i = 0 to nClosed - 1
             entryTime = strategy.closedtrades.entry_time(i)
             tradeProfit = strategy.closedtrades.profit(i)
-            h = hour(entryTime, syminfo.timezone)
+            h = hour(entryTime, sessionTZ)
             array.set(hourTradeCount, h, array.get(hourTradeCount, h) + 1)
             if tradeProfit > 0
                 array.set(hourWinCount, h, array.get(hourWinCount, h) + 1)

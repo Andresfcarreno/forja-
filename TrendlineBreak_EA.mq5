@@ -74,6 +74,11 @@ input double           TouchATRMultiplier   = 0.35;   // how close (x ATR) price
 input bool             UseEngulfingPattern  = true;   // confirm bounce with engulfing pattern
 input bool             UsePinBarPattern     = true;   // confirm bounce with pin bar (hammer / shooting star)
 
+input group "=== Weekend Gap Protection ==="
+input bool   CloseBeforeWeekend     = true;   // close any open position and block new entries before the weekly close
+input int    FridayCloseHour        = 20;     // hour (0-23, SERVER/broker time) on Friday to start blocking/closing
+                                               // a backtested weekend-held trade lost 7x its normal risk to a gap - check your broker's GMT offset
+
 input group "=== Risk / Stop Loss / Take Profit ==="
 input double SL_ATR_Multiplier      = 1.5;
 input double RR_Multiplier          = 3.0;
@@ -254,6 +259,7 @@ void UpdatePanel()
    color  statusColor;
    if(accountBlownProtection)      { statusText = "DETENIDO (drawdown maximo)"; statusColor = clrRed; }
    else if(dailyProtectionActive)  { statusText = "PAUSADO HOY (perdida diaria)"; statusColor = clrOrange; }
+   else if(InWeekendCloseWindow()) { statusText = "Cierre de fin de semana"; statusColor = clrOrange; }
    else if(consecutiveLosses >= MaxConsecutiveLosses) { statusText = "PAUSADO (" + IntegerToString(consecutiveLosses) + " SL seguidos)"; statusColor = clrOrange; }
    else if(PositionSelect(_Symbol))
      {
@@ -387,7 +393,23 @@ bool TradingPaused()
    MaybeRolloverDay();
    if(accountBlownProtection) return(true);
    if(dailyProtectionActive)  return(true);
+   if(InWeekendCloseWindow()) return(true);
    return(consecutiveLosses >= MaxConsecutiveLosses);
+  }
+
+//+------------------------------------------------------------------+
+//| A position held into the weekly close can gap hugely on reopen -  |
+//| a backtested weekend-held trade lost 7x its normal risk to this.  |
+//| Hours are SERVER/broker time, same convention as the rest of the  |
+//| EA's time-based inputs - adjust FridayCloseHour to your broker's  |
+//| GMT offset so it actually lands before their real weekly close.   |
+//+------------------------------------------------------------------+
+bool InWeekendCloseWindow()
+  {
+   if(!CloseBeforeWeekend) return(false);
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   return(dt.day_of_week == 5 && dt.hour >= FridayCloseHour); // 5 = Friday
   }
 
 //+------------------------------------------------------------------+
@@ -677,6 +699,13 @@ void ManageOpenPositions()
    if(MaxProfitPerTradeUSD > 0 && PositionGetDouble(POSITION_PROFIT) >= MaxProfitPerTradeUSD)
      {
       trade.PositionClose(_Symbol);
+      return;
+     }
+
+   if(InWeekendCloseWindow())
+     {
+      trade.PositionClose(_Symbol);
+      if(EnablePushNotifications) SendNotification(_Symbol + " cerrada antes del fin de semana (proteccion de gap)");
       return;
      }
 

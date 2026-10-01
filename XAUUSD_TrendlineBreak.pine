@@ -71,6 +71,8 @@ panelBarsRight = input.int(20, "Panel width (bars to the right)", minval=5, grou
 showLivePanel  = input.bool(true, "Show live scanning panel", group="Visuals")
 panelSize      = input.string("normal", "Panel text size", options=["tiny", "small", "normal"], group="Visuals")
 tSize = panelSize == "tiny" ? size.tiny : panelSize == "small" ? size.small : size.normal
+showHourlyStats = input.bool(true, "Show performance-by-hour table", group="Visuals",
+     tooltip="Breaks down every closed trade in this backtest by the hour it was opened (chart/exchange time), showing trade count, win rate and net P/L per hour - no export needed, works on any plan.")
 
 // ===================== PIVOTS & TRENDLINES ============================
 atrVal = ta.atr(atrLen)
@@ -336,3 +338,43 @@ if showLivePanel and barstate.islast
 
     table.cell(livePanel, 0, 9, "Ventana horaria", text_color=color.white, bgcolor=color.gray, text_size=tSize)
     table.cell(livePanel, 1, 9, useTimeFilter ? sessionWindow + " " + sessionTZ + (inSession ? " (activa)" : " (cerrada)") : "Desactivada", text_color=color.white, bgcolor=color.navy, text_size=tSize)
+
+// ===================== PERFORMANCE BY HOUR (no export needed) ===========
+// Reads strategy.closedtrades directly - every closed trade in this backtest,
+// bucketed by the hour (chart/exchange time) its entry fired. Answers "which
+// hours does this actually work in" without needing to export anything.
+var table hourlyPanel = table.new(position.bottom_right, 4, 25, border_width=1)
+if showHourlyStats and barstate.islast
+    table.cell(hourlyPanel, 0, 0, "Hora", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(hourlyPanel, 1, 0, "Trades", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(hourlyPanel, 2, 0, "Win%", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+    table.cell(hourlyPanel, 3, 0, "P/L neto", text_color=color.white, bgcolor=color.gray, text_size=size.tiny)
+
+    var int[]   hourTradeCount = array.new<int>(24, 0)
+    var int[]   hourWinCount   = array.new<int>(24, 0)
+    var float[] hourNetPL      = array.new<float>(24, 0.0)
+    array.fill(hourTradeCount, 0)
+    array.fill(hourWinCount, 0)
+    array.fill(hourNetPL, 0.0)
+
+    int nClosed = strategy.closedtrades
+    if nClosed > 0
+        for i = 0 to nClosed - 1
+            entryTime = strategy.closedtrades.entry_time(i)
+            tradeProfit = strategy.closedtrades.profit(i)
+            h = hour(entryTime, syminfo.timezone)
+            array.set(hourTradeCount, h, array.get(hourTradeCount, h) + 1)
+            if tradeProfit > 0
+                array.set(hourWinCount, h, array.get(hourWinCount, h) + 1)
+            array.set(hourNetPL, h, array.get(hourNetPL, h) + tradeProfit)
+
+    for h = 0 to 23
+        cnt = array.get(hourTradeCount, h)
+        wins = array.get(hourWinCount, h)
+        pl = array.get(hourNetPL, h)
+        winPct = cnt > 0 ? wins * 100.0 / cnt : 0.0
+        rowColor = cnt == 0 ? color.new(color.gray, 85) : pl > 0 ? color.new(color.green, 75) : color.new(color.red, 75)
+        table.cell(hourlyPanel, 0, h + 1, str.tostring(h) + ":00", text_color=color.white, bgcolor=color.navy, text_size=size.tiny)
+        table.cell(hourlyPanel, 1, h + 1, str.tostring(cnt), text_color=color.white, bgcolor=rowColor, text_size=size.tiny)
+        table.cell(hourlyPanel, 2, h + 1, cnt > 0 ? str.tostring(winPct, "#.#") + "%" : "-", text_color=color.white, bgcolor=rowColor, text_size=size.tiny)
+        table.cell(hourlyPanel, 3, h + 1, cnt > 0 ? str.tostring(pl, "#.##") : "-", text_color=color.white, bgcolor=rowColor, text_size=size.tiny)

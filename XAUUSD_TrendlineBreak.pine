@@ -65,6 +65,10 @@ slATRMult  = input.float(1.5, "SL = ATR x", group="Risk / SL / TP")
 rrMult     = input.float(3.0, "Risk:Reward multiple (TP = SL distance x this)", group="Risk / SL / TP")
 atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
 
+useFixedRiskUSD = input.bool(true, "Use fixed $ risk per trade (matches the MT5 EA)", group="Risk / SL / TP",
+     tooltip="On: position size is calculated so a stop-loss hit always costs this many dollars, the same model TrendlineBreak_EA.mq5 uses live. Off: falls back to 100% of equity per trade (the old default) - on a high-priced instrument like an index, that sizes down to a tiny position and tiny $ P&L, understating what real fixed-risk trading would have made.")
+fixedRiskUSD    = input.float(50.0, "Risk per trade (USD)", group="Risk / SL / TP")
+
 showRPanel     = input.bool(true, "Draw automatic R-multiple panel on entry", group="Visuals")
 maxRLevels     = input.int(5, "Max R levels to draw", minval=1, maxval=10, group="Visuals")
 panelBarsRight = input.int(20, "Panel width (bars to the right)", minval=5, group="Visuals")
@@ -233,7 +237,18 @@ drawTrade(isLong, reason) =>
     tpPrice    = isLong ? entryPrice + slDist * rrMult : entryPrice - slDist * rrMult
     idPrefix   = isLong ? "Long" : "Short"
 
-    strategy.entry(idPrefix, isLong ? strategy.long : strategy.short)
+    // Same fixed-$-risk sizing the MT5 EA uses: qty such that hitting the SL
+    // costs exactly fixedRiskUSD, regardless of this instrument's price level.
+    // Without this, strategy()'s default 100%-of-equity sizing on a
+    // high-priced symbol (e.g. an index around 50,000) sizes down to a
+    // fraction of a contract, understating what real fixed-risk trading
+    // would actually have made.
+    qty = useFixedRiskUSD and slDist > 0 and syminfo.pointvalue > 0 ? fixedRiskUSD / (slDist * syminfo.pointvalue) : na
+
+    if useFixedRiskUSD
+        strategy.entry(idPrefix, isLong ? strategy.long : strategy.short, qty=qty)
+    else
+        strategy.entry(idPrefix, isLong ? strategy.long : strategy.short)
     strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice)
 
     // Compact on-chart mark (direction + entry price only) - full detail lives in the live panel below,

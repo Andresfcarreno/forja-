@@ -108,6 +108,12 @@ Las líneas de resistencia/soporte y el panel ya no dependen de que el EA "obser
 
 Mismo procedimiento que el sistema de sesión (sección 1): compilar/adjuntar el `.mq5` en MT5, o pegar el `.pine` en el Pine Editor de TradingView. Mismas advertencias sobre backtest/demo antes de capital real, y mismo filtro de spread máximo en el EA.
 
+## Análisis de desempeño (línea base)
+
+[`analysis/2026-09-06_a_2026-10-01_US30_TLBreak.xlsx`](analysis/2026-09-06_a_2026-10-01_US30_TLBreak.xlsx) — análisis completo de las 231 operaciones del backtest de Trendline Break en US30 (5 min, 6 sept–1 oct 2026): desglose por hora, por día de la semana, prueba de una regla de "cooldown tras ganar" (no se sostiene fuera de muestra, no activada), y rachas de pérdidas. Conclusión: con 25 días de datos no hay señal suficiente para calibrar filtro de horario ni cooldown — las únicas hipótesis a vigilar con más historial son el lunes (pierde en ambas mitades del mes) y las horas 2/8/13/22h. No se aplicó ningún cambio al código a partir de este análisis.
+
+Este archivo es la línea base para repetir el mismo análisis con 3-6 meses de historial antes de considerar cambios al EA.
+
 ## Nota sobre LuxAlgo específicamente
 
 Si de verdad quieres seguir usando el indicador LuxAlgo tal cual (no esta recreación propia) y automatizar sobre él: haz clic derecho sobre el indicador en el gráfico → "Agregar alerta" y revisa qué condiciones aparecen en la lista. Si el script trae `alertcondition()` propias para ruptura alcista/bajista, puedes usarlas para disparar un webhook hacia un puente que ejecute la orden en tu bróker — sin necesidad de ningún script adicional. Esto solo funciona si el autor del indicador incluyó esas alertas; si no aparecen en la lista, esa vía no es posible y el camino queda siendo esta recreación propia.

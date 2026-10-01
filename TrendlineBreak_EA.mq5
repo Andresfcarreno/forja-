@@ -62,14 +62,17 @@ enum ENUM_ENTRY_MODE
 input group "=== General ==="
 input ulong  MagicNumber            = 20260912;
 input string TradeComment           = "TLBreak";
-input double MaxSpreadPoints        = 500;
+input double MaxSpreadPrice         = 5.0;    // in price units (e.g. 5.0 = $5.00), NOT broker "points" - symbol-independent
 
 input group "=== Trendline ==="
 input int    PivotLookback          = 5;      // bars each side to confirm a pivot
 
 input group "=== Entry Logic ==="
 input ENUM_ENTRY_MODE EntryMode        = ENTRY_BOTH;  // Breakout=continuation, Bounce=reversal, Both=react to whichever happens
-input double           BreakoutBufferPoints = 200;    // extra buffer beyond the line, in points, to confirm a breakout
+input double           BreakoutBufferPrice  = 0.20;   // extra buffer beyond the line, in price units (matches the Pine
+                                                       // script's breakoutBuffer exactly), NOT broker "points" - was
+                                                       // 200 "points" before, which on a 0.01-tick symbol worked out to
+                                                       // $2.00 (10x stricter than the $0.20 actually validated in Pine)
 input double           TouchATRMultiplier   = 0.35;   // how close (x ATR) price must get to the line to count as a touch
 input bool             UseEngulfingPattern  = true;   // confirm bounce with engulfing pattern
 input bool             UsePinBarPattern     = true;   // confirm bounce with pin bar (hammer / shooting star)
@@ -200,8 +203,8 @@ double GetATR()
 
 bool SpreadOK()
   {
-   double spreadPts = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
-   return(spreadPts <= MaxSpreadPoints);
+   double spreadPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   return(spreadPrice <= MaxSpreadPrice);
   }
 
 //+------------------------------------------------------------------+
@@ -903,7 +906,7 @@ void OnTick()
    double atr = GetATR();
    gAtr = atr;
    double touchTol = atr * TouchATRMultiplier;
-   double bufferPrice = BreakoutBufferPoints * _Point;
+   double bufferPrice = BreakoutBufferPrice;
 
    bool   bullSignal = false, bearSignal = false;
    string reasonLong = "", reasonShort = "";

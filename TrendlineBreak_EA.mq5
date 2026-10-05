@@ -58,6 +58,13 @@ enum ENUM_ENTRY_MODE
    ENTRY_BOTH
   };
 
+enum ENUM_EXIT_MODE
+  {
+   EXIT_FIXED,       // Fixed SL/TP (the validated backtest)
+   EXIT_PARTIAL_BE,  // Partial close at PartialAtR, rest runs to TP with SL at breakeven
+   EXIT_TRAIL        // Breakeven + ATR trailing (not validated in backtest)
+  };
+
 //====================== INPUTS ======================================
 input group "=== General ==="
 input ulong  MagicNumber            = 20260912;
@@ -95,20 +102,27 @@ input double SL_ATR_Multiplier      = 1.5;
 input double RR_Multiplier          = 3.0;
 input int    ATR_Period             = 14;
 
-input group "=== Breakeven / Trailing ==="
-input bool   UseBreakevenTrail      = true;   // move SL to breakeven, then trail, once a trade is in profit
-input double BreakevenAtR           = 1.0;    // move SL to breakeven once price reaches this many R
-input double TrailATRMultiplier     = 1.5;    // once past breakeven, trail SL by ATR * this
+input group "=== Exit Management ==="
+input ENUM_EXIT_MODE ExitMode       = EXIT_PARTIAL_BE; // account owner's chosen design. Only EXIT_FIXED is validated in the
+                                                        // Pine backtest - compare all three with Pine's "Exit mode" input
+input double PartialAtR             = 1.0;    // EXIT_PARTIAL_BE: close part of the position at this many R
+input double PartialClosePercent    = 50.0;   // EXIT_PARTIAL_BE: % of the position closed at PartialAtR
+input double BreakevenLockUSD       = 5.0;    // EXIT_PARTIAL_BE: after the partial, the rest's SL locks in this much
+                                               // profit (USD, on the remaining volume) instead of exact breakeven
+input double BreakevenAtR           = 1.0;    // EXIT_TRAIL: move SL to breakeven once price reaches this many R
+input double TrailATRMultiplier     = 1.5;    // EXIT_TRAIL: once past breakeven, trail SL by ATR * this
 
 input group "=== Position Sizing (your account) ==="
 input bool   UseFixedRiskUSD        = true;   // true = risk a fixed $ amount per trade; false = risk % of balance
-input double FixedRiskUSD           = 30.0;   // $ risked per trade when UseFixedRiskUSD is on
+input double FixedRiskUSD           = 50.0;   // $ risked per trade when UseFixedRiskUSD is on
 input double RiskPercent            = 1.0;    // used only when UseFixedRiskUSD is off
 input double MaxLotSize             = 5.0;    // hard cap - never trade more than this, whatever the risk calc says
 
 input group "=== Loss Circuit Breaker ==="
-input int    MaxConsecutiveLosses   = 2;      // pause new entries after this many stop-loss hits in a row
-                                               // (auto-resumes at the start of the next calendar day)
+input int    MaxConsecutiveLosses   = 2;      // pause new entries after this many losing stop-loss hits in a row
+                                               // (auto-resumes at the start of the next server calendar day). A stop
+                                               // that closes at breakeven or in profit (trailing / after a partial)
+                                               // is not a loss and doesn't count.
 
 input group "=== Account Protection (prop firm limits) ==="
 input double DailyLossLimitPercent  = 2.5;    // % of the day's starting balance - stop trading for the day if hit
@@ -161,7 +175,9 @@ bool     gTouchingRes = false, gTouchingSup = false;
 string   lastSignalReason = "n/a";
 datetime lastSignalTime   = 0;
 
-#define PANEL_ROWS 11
+ulong    gPartialTicket   = 0;   // position that already had its partial close (EXIT_PARTIAL_BE)
+
+#define PANEL_ROWS 12
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -311,7 +327,7 @@ void UpdatePanel()
       double sl    = PositionGetDouble(POSITION_SL);
       double tp    = PositionGetDouble(POSITION_TP);
       long   ptype = PositionGetInteger(POSITION_TYPE);
-      double riskDist = MathAbs(entry - sl);
+      double riskDist = OriginalRiskDist(entry, sl, tp);
       double liveR = (riskDist > 0) ? ((ptype == POSITION_TYPE_BUY) ? (price - entry) / riskDist : (entry - price) / riskDist) : 0;
 
       SetPanelRow(5, "Posicion: " + DoubleToString(vol, 2) + " lotes @ " + DoubleToString(entry, _Digits), clrWhite);
@@ -339,6 +355,16 @@ void UpdatePanel()
    double drawdownPct  = (peakEquity > 0)      ? (peakEquity - equity) / peakEquity * 100.0           : 0.0;
    SetPanelRow(9,  "Perdida diaria: " + DoubleToString(MathMax(dailyLossPct, 0), 2) + "% / limite " + DoubleToString(DailyLossLimitPercent, 1) + "%", dailyLossPct > DailyLossLimitPercent * 0.7 ? clrOrange : clrWhite);
    SetPanelRow(10, "Drawdown: " + DoubleToString(MathMax(drawdownPct, 0), 2) + "% / limite " + DoubleToString(MaxDrawdownPercent, 1) + "%", drawdownPct > MaxDrawdownPercent * 0.7 ? clrOrange : clrWhite);
+   SetPanelRow(11, "Salida: " + ExitModeName() + " | Riesgo $" + DoubleToString(RiskMoney(), 0), clrSilver);
+  }
+
+string ExitModeName()
+  {
+   if(ExitMode == EXIT_PARTIAL_BE)
+      return("Parcial " + DoubleToString(PartialClosePercent, 0) + "% en " + DoubleToString(PartialAtR, 1) + "R, SL a +$" + DoubleToString(BreakevenLockUSD, 0));
+   if(ExitMode == EXIT_TRAIL)
+      return("BE + trailing ATR");
+   return("SL/TP fijo");
   }
 
 //+------------------------------------------------------------------+
@@ -428,9 +454,22 @@ bool InWeekendCloseWindow()
   }
 
 //+------------------------------------------------------------------+
+double RiskMoney()
+  {
+   return(UseFixedRiskUSD ? FixedRiskUSD : (AccountInfoDouble(ACCOUNT_BALANCE) * RiskPercent / 100.0));
+  }
+
+// The entry's 1R distance, recovered from the TP (never modified) rather than
+// the SL - once the SL is moved to breakeven, |entry - SL| is no longer 1R.
+double OriginalRiskDist(double entry, double sl, double tp)
+  {
+   if(tp > 0 && RR_Multiplier > 0) return(MathAbs(tp - entry) / RR_Multiplier);
+   return(MathAbs(entry - sl));
+  }
+
 double CalcLotSize(double slDistancePrice)
   {
-   double riskMoney = UseFixedRiskUSD ? FixedRiskUSD : (AccountInfoDouble(ACCOUNT_BALANCE) * RiskPercent / 100.0);
+   double riskMoney = RiskMoney();
 
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -701,10 +740,9 @@ void DrawRPanel(bool isLong, datetime t, double entry, double sl, double slDist)
   }
 
 //+------------------------------------------------------------------+
-//| Manages an already-open position: moves SL to breakeven once the |
-//| trade reaches BreakevenAtR, then trails it by ATR; and enforces   |
-//| MaxProfitPerTradeUSD as a hard safety cap on a single trade's     |
-//| profit (closes immediately if hit, regardless of TP).             |
+//| Manages an already-open position per ExitMode (fixed SL/TP,       |
+//| partial close + breakeven, or breakeven + ATR trail), and         |
+//| enforces MaxProfitPerTradeUSD and the weekend close.              |
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
   {
@@ -724,25 +762,66 @@ void ManageOpenPositions()
       return;
      }
 
-   if(!UseBreakevenTrail) return;
+   if(ExitMode == EXIT_FIXED) return;
 
-   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-   double sl    = PositionGetDouble(POSITION_SL);
-   double tp    = PositionGetDouble(POSITION_TP);
-   long   type  = PositionGetInteger(POSITION_TYPE);
+   ulong  ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+   double entry  = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl     = PositionGetDouble(POSITION_SL);
+   double tp     = PositionGetDouble(POSITION_TP);
+   double vol    = PositionGetDouble(POSITION_VOLUME);
+   long   type   = PositionGetInteger(POSITION_TYPE);
+   bool   isBuy  = (type == POSITION_TYPE_BUY);
+
+   double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                        : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   double riskDist = OriginalRiskDist(entry, sl, tp);
+   if(riskDist <= 0) return;
+
+   double rMultiple = isBuy ? (price - entry) / riskDist
+                            : (entry - price) / riskDist;
+
+   if(ExitMode == EXIT_PARTIAL_BE)
+     {
+      bool beDone = isBuy ? (sl >= entry) : (sl > 0 && sl <= entry);
+      if(beDone) return;
+
+      if(ticket != gPartialTicket)
+        {
+         if(rMultiple < PartialAtR) return;
+
+         double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+         double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+         if(step <= 0) step = 0.01;
+         int    volDigits = (int)MathMax(0, MathCeil(-MathLog10(step) - 1e-9));
+         double closeVol  = NormalizeDouble(MathFloor(vol * PartialClosePercent / 100.0 / step + 1e-9) * step, volDigits);
+         // Too small to split (e.g. a min-lot position): leave it on its original SL/TP.
+         if(closeVol < minLot || vol - closeVol < minLot - 1e-9) return;
+
+         if(!trade.PositionClosePartial(ticket, closeVol)) return;
+         gPartialTicket = ticket;
+        }
+
+      // SL that locks BreakevenLockUSD on the remaining volume (never more than half of 1R).
+      double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double remaining = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_VOLUME) : vol;
+      double lockDist  = (tickSize > 0 && tickValue > 0 && remaining > 0)
+                         ? BreakevenLockUSD / (remaining * tickValue / tickSize) : 0.0;
+      lockDist = MathMin(MathMax(lockDist, 0.0), riskDist * 0.5);
+      double lockSL = NormalizeDouble(isBuy ? entry + lockDist : entry - lockDist, _Digits);
+
+      // Retried every tick until the broker accepts it (only possible while price is past the lock level).
+      if(isBuy ? price > lockSL : price < lockSL)
+         trade.PositionModify(ticket, lockSL, tp);
+      return;
+     }
+
+   // EXIT_TRAIL
+   if(rMultiple < BreakevenAtR) return;
 
    double atr = GetATR();
    if(atr <= 0) return;
-
-   double price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
-                                               : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-   double riskDist = MathAbs(entry - sl);
-   if(riskDist <= 0) return;
-
-   double rMultiple = (type == POSITION_TYPE_BUY) ? (price - entry) / riskDist
-                                                   : (entry - price) / riskDist;
-   if(rMultiple < BreakevenAtR) return;
 
    double trail = atr * TrailATRMultiplier;
    double newSL = sl;
@@ -834,25 +913,51 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    long dealEntry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
    if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY) return; // only care about closing deals
 
-   double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+   double dealPL = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
                  + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
                  + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
-   long reasonCode = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+   long  reasonCode = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+   ulong posId      = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+
+   // Net result of the whole position (entry commission + partial closes + final close).
+   double netPL = dealPL, inVol = 0, outVol = 0;
+   if(HistorySelectByPosition(posId))
+     {
+      netPL = 0;
+      for(int i = 0; i < HistoryDealsTotal(); i++)
+        {
+         ulong d = HistoryDealGetTicket(i);
+         long  e = HistoryDealGetInteger(d, DEAL_ENTRY);
+         if(e == DEAL_ENTRY_IN) inVol += HistoryDealGetDouble(d, DEAL_VOLUME);
+         else                   outVol += HistoryDealGetDouble(d, DEAL_VOLUME);
+         netPL += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP)
+                + HistoryDealGetDouble(d, DEAL_COMMISSION);
+        }
+     }
+
+   if(inVol > 0 && outVol < inVol - 1e-8)
+     {
+      if(EnablePushNotifications)
+         SendNotification(_Symbol + " CIERRE PARCIAL en TP1: +" + DoubleToString(dealPL, 2) + " | el resto sigue hacia el TP");
+      return;
+     }
 
    MaybeRolloverDay();
 
    bool wasSL = (reasonCode == DEAL_REASON_SL);
    bool wasTP = (reasonCode == DEAL_REASON_TP);
 
-   if(wasSL)
+   // Only a stop that actually lost money counts toward the pause - a trailing/breakeven/
+   // post-partial stop that closed flat or in profit is not a losing stop-loss.
+   if(wasSL && netPL < -0.1 * RiskMoney())
       consecutiveLosses++;
-   else if(profit > 0)
+   else if(netPL > 0)
       consecutiveLosses = 0;
 
    if(EnablePushNotifications)
      {
       string reasonStr = wasSL ? "STOP LOSS" : wasTP ? "TAKE PROFIT" : "Manual/Reversa";
-      string msg = _Symbol + " CERRADA (" + reasonStr + ") P/L: " + DoubleToString(profit, 2) +
+      string msg = _Symbol + " CERRADA (" + reasonStr + ") P/L operacion: " + DoubleToString(netPL, 2) +
                    " | SL seguidos: " + IntegerToString(consecutiveLosses) + "/" + IntegerToString(MaxConsecutiveLosses);
       SendNotification(msg);
      }

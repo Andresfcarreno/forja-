@@ -71,7 +71,18 @@ atrLen     = input.int(14, "ATR period", group="Risk / SL / TP")
 
 useFixedRiskUSD = input.bool(true, "Use fixed $ risk per trade (matches the MT5 EA)", group="Risk / SL / TP",
      tooltip="On: position size is calculated so a stop-loss hit always costs this many dollars, the same model TrendlineBreak_EA.mq5 uses live. Off: falls back to 100% of equity per trade (the old default) - on a high-priced instrument like an index, that sizes down to a tiny position and tiny $ P&L, understating what real fixed-risk trading would have made.")
-fixedRiskUSD    = input.float(30.0, "Risk per trade (USD)", group="Risk / SL / TP")
+fixedRiskUSD    = input.float(50.0, "Risk per trade (USD)", group="Risk / SL / TP")
+
+EXIT_FIXED   = "Fixed SL/TP (validated)"
+EXIT_PARTIAL = "Partial at TP1 + lock profit (EA default)"
+EXIT_TRAIL   = "Breakeven + ATR trail (old EA)"
+exitMode     = input.string(EXIT_PARTIAL, "Exit mode", options=[EXIT_FIXED, EXIT_PARTIAL, EXIT_TRAIL], group="Exit Management",
+     tooltip="Same three modes as the EA's ExitMode input - switch here and compare Net Profit, Profit Factor and Max Drawdown in the Strategy Tester. In partial mode every partial close counts as its own trade, so ignore trade count / win % when comparing.")
+partialAtR   = input.float(1.0, "Partial: close at this many R (TP1)", step=0.25, group="Exit Management")
+partialPct   = input.float(50.0, "Partial: % closed at TP1", minval=1, maxval=99, group="Exit Management")
+lockUSD      = input.float(5.0, "Partial: rest's SL locks this much profit (USD)", group="Exit Management")
+beAtR        = input.float(1.0, "Trail: activate at this many R", step=0.25, group="Exit Management")
+trailATRMult = input.float(1.5, "Trail: distance = ATR x", step=0.25, group="Exit Management")
 
 showRPanel     = input.bool(true, "Draw automatic R-multiple panel on entry", group="Visuals")
 maxRLevels     = input.int(5, "Max R levels to draw", minval=1, maxval=10, group="Visuals")
@@ -260,7 +271,18 @@ drawTrade(isLong, reason) =>
         strategy.entry(idPrefix, isLong ? strategy.long : strategy.short, qty=qty)
     else
         strategy.entry(idPrefix, isLong ? strategy.long : strategy.short)
-    strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice)
+
+    if exitMode == EXIT_PARTIAL
+        tp1Price = isLong ? entryPrice + slDist * partialAtR : entryPrice - slDist * partialAtR
+        strategy.exit(idPrefix + "TP1", idPrefix, qty_percent=partialPct, stop=slPrice, limit=tp1Price)
+        strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice)
+    else if exitMode == EXIT_TRAIL
+        // Approximates the EA's trailing: activates at beAtR and trails ATR x trailATRMult behind price.
+        trailStart = isLong ? entryPrice + slDist * beAtR : entryPrice - slDist * beAtR
+        trailTicks = math.max(1, math.round(atrVal * trailATRMult / syminfo.mintick))
+        strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice, trail_price=trailStart, trail_offset=trailTicks)
+    else
+        strategy.exit(idPrefix + "Exit", idPrefix, stop=slPrice, limit=tpPrice)
 
     // Compact on-chart mark (direction + entry price only) - full detail lives in the live panel below,
     // so the chart doesn't get buried in text boxes when several trades fire close together.
@@ -300,6 +322,23 @@ if finalShort
     lastWasLong := false
     lastReason := reasonShort
     lastSignalBar := bar_index
+
+// ===================== PARTIAL MODE: LOCK PROFIT ON THE REST AFTER TP1 ===
+// A partial exit shows up as a closed trade sharing the open trade's entry bar.
+var int   lockedEntryBar = na
+var float lockStopPrice  = na
+curEntryBar   = strategy.opentrades > 0 ? strategy.opentrades.entry_bar_index(0) : na
+partialFilled = na(curEntryBar) or strategy.closedtrades == 0 ? false : strategy.closedtrades.entry_bar_index(strategy.closedtrades - 1) == curEntryBar
+
+if exitMode == EXIT_PARTIAL and partialFilled and (na(lockedEntryBar) or lockedEntryBar != curEntryBar) and not finalLong and not finalShort
+    isLongP   = strategy.position_size > 0
+    remQty    = math.abs(strategy.position_size)
+    avgPx     = strategy.position_avg_price
+    oneR      = math.abs(lastTP - lastEntry) / rrMult
+    lockDist  = remQty > 0 and syminfo.pointvalue > 0 ? math.min(lockUSD / (remQty * syminfo.pointvalue), oneR * 0.5) : 0.0
+    lockStopPrice := isLongP ? avgPx + lockDist : avgPx - lockDist
+    strategy.exit((isLongP ? "Long" : "Short") + "Exit", isLongP ? "Long" : "Short", stop=lockStopPrice, limit=lastTP)
+    lockedEntryBar := curEntryBar
 
 // ===================== ALERTS (for webhook -> broker bridge) ===========
 alertcondition(finalLong,      title="XAU TL Break BUY (any)",       message="XAUUSD trendline BUY signal")
@@ -353,7 +392,8 @@ if showLivePanel and barstate.islast
     table.cell(livePanel, 1, 4, inPosition ? str.tostring(math.abs(posSize), "#.##") + " lotes @ " + str.tostring(lastEntry, format.mintick) : "Sin posición", text_color=color.white, bgcolor=color.navy, text_size=tSize)
 
     table.cell(livePanel, 0, 5, "SL / TP", text_color=color.white, bgcolor=color.gray, text_size=tSize)
-    table.cell(livePanel, 1, 5, inPosition ? str.tostring(lastSL, format.mintick) + " / " + str.tostring(lastTP, format.mintick) : "n/a", text_color=color.white, bgcolor=color.navy, text_size=tSize)
+    slShown = (exitMode == EXIT_PARTIAL and not na(lockedEntryBar) and lockedEntryBar == curEntryBar) ? lockStopPrice : lastSL
+    table.cell(livePanel, 1, 5, inPosition ? str.tostring(slShown, format.mintick) + " / " + str.tostring(lastTP, format.mintick) : "n/a", text_color=color.white, bgcolor=color.navy, text_size=tSize)
 
     table.cell(livePanel, 0, 6, "R actual", text_color=color.white, bgcolor=color.gray, text_size=tSize)
     table.cell(livePanel, 1, 6, na(liveR) ? "n/a" : str.tostring(liveR, "#.##") + "R  (objetivo 1:" + str.tostring(rrMult, "#.##") + ")", text_color=color.white, bgcolor=liveR > 0 ? color.new(color.green, 20) : color.new(color.red, 20), text_size=tSize)

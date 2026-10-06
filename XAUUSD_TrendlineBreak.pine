@@ -74,9 +74,9 @@ useFixedRiskUSD = input.bool(true, "Use fixed $ risk per trade (matches the MT5 
 fixedRiskUSD    = input.float(50.0, "Risk per trade (USD)", group="Risk / SL / TP")
 
 EXIT_FIXED   = "Fixed SL/TP (validated)"
-EXIT_PARTIAL = "Partial at TP1 + lock profit (EA default)"
+EXIT_PARTIAL = "Partial at TP1 + lock profit"
 EXIT_TRAIL   = "Breakeven + ATR trail (old EA)"
-exitMode     = input.string(EXIT_PARTIAL, "Exit mode", options=[EXIT_FIXED, EXIT_PARTIAL, EXIT_TRAIL], group="Exit Management",
+exitMode     = input.string(EXIT_FIXED, "Exit mode", options=[EXIT_FIXED, EXIT_PARTIAL, EXIT_TRAIL], group="Exit Management",
      tooltip="Same three modes as the EA's ExitMode input - switch here and compare Net Profit, Profit Factor and Max Drawdown in the Strategy Tester. In partial mode every partial close counts as its own trade, so ignore trade count / win % when comparing.")
 partialAtR   = input.float(1.0, "Partial: close at this many R (TP1)", step=0.25, group="Exit Management")
 partialPct   = input.float(50.0, "Partial: % closed at TP1", minval=1, maxval=99, group="Exit Management")

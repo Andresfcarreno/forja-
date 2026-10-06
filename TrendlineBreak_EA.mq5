@@ -103,8 +103,8 @@ input double RR_Multiplier          = 3.0;
 input int    ATR_Period             = 14;
 
 input group "=== Exit Management ==="
-input ENUM_EXIT_MODE ExitMode       = EXIT_PARTIAL_BE; // account owner's chosen design. Only EXIT_FIXED is validated in the
-                                                        // Pine backtest - compare all three with Pine's "Exit mode" input
+input ENUM_EXIT_MODE ExitMode       = EXIT_FIXED; // the only exit validated in backtest (US30 5m, 6 Sep-5 Oct 2026: RR 3
+                                                   // positive in both halves). PARTIAL_BE / TRAIL are untested options
 input double PartialAtR             = 1.0;    // EXIT_PARTIAL_BE: close part of the position at this many R
 input double PartialClosePercent    = 50.0;   // EXIT_PARTIAL_BE: % of the position closed at PartialAtR
 input double BreakevenLockUSD       = 5.0;    // EXIT_PARTIAL_BE: after the partial, the rest's SL locks in this much
@@ -119,10 +119,12 @@ input double RiskPercent            = 1.0;    // used only when UseFixedRiskUSD 
 input double MaxLotSize             = 5.0;    // hard cap - never trade more than this, whatever the risk calc says
 
 input group "=== Loss Circuit Breaker ==="
-input int    MaxConsecutiveLosses   = 2;      // pause new entries after this many losing stop-loss hits in a row
+input int    MaxConsecutiveLosses   = 4;      // pause new entries after this many losing stop-loss hits in a row
                                                // (auto-resumes at the start of the next server calendar day). A stop
                                                // that closes at breakeven or in profit (trailing / after a partial)
-                                               // is not a loss and doesn't count.
+                                               // is not a loss and doesn't count. Backtest: stopping after 2 turned
+                                               // +$1,071 into -$197 (2 losses in a row are normal at ~35% win rate);
+                                               // 4 gave +$1,316.
 
 input group "=== Account Protection (prop firm limits) ==="
 input double DailyLossLimitPercent  = 2.5;    // % of the day's starting balance - stop trading for the day if hit
